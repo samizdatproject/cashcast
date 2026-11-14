@@ -35,6 +35,15 @@ export function buildServer(cfg) {
   const tracks = new Map(catalog.map((m) => [m.trackId, m]));
   const app = Fastify({ logger, trustProxy }); // trustProxy only behind a local reverse proxy (real client IPs for rate limits)
   app.register(rateLimit, { max: rateLimitMax, timeWindow: '1 minute' });
+  // Strict content security policy: scripts only from this site (plus WebAssembly for the crypto
+  // library), connections only to this site and the WizardConnect relays.
+  const csp = ["default-src 'self'", "script-src 'self' 'wasm-unsafe-eval'", "connect-src 'self' wss:",
+    "style-src 'self' https://fonts.googleapis.com", "font-src https://fonts.gstatic.com", "img-src 'self' data: https:",
+    "media-src 'self' blob:", "worker-src 'self' blob:", "frame-ancestors 'none'", "base-uri 'none'", "form-action 'none'"].join('; ');
+  app.addHook('onSend', async (req, reply, payload) => {
+    reply.header('content-security-policy', csp).header('x-content-type-options', 'nosniff').header('referrer-policy', 'no-referrer');
+    return payload;
+  });
 
   let heightCache = { at: 0, value: 0 };
   async function height() {

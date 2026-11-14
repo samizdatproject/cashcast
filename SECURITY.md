@@ -10,7 +10,9 @@ All of this is enforced by the contract, not by the CashCast server:
 - **Keyless refund.** After the block-height timeout anyone can return the whole balance to the listener. The refund must have exactly one output, paid to the listener; the fee is capped (`maxRefundFee`), so a bot cannot skim it.
 - **Tokens are untouchable.** A token sent to a channel by mistake cannot be spent by either path.
 
-The listener's app rebuilds the channel address from parameters it checks itself, and funds only the plain (non-token) address.
+**The browser checks the channel itself before the wallet signs** (`web/src/verify.js`): it rebuilds the contract address from the listener's own refund key, its own session key and CashCast's key pinned into the page at build time, and refuses unless the timeout is 24–200 blocks away (estimated from the clock), the refund-fee cap is at most 2,000 sats and the budget is within limits. It funds only the plain (non-token) address. The signed funding transaction must re-encode to exactly the bytes sent for signing.
+
+**The browser bounds its own payments:** the price per segment is pinned when the listener approves (the server cannot raise it), and the browser counts the keys it fetched itself, so it never signs more than about 5 segments ahead, whatever the server says.
 
 ## What the listener trusts CashCast for
 
@@ -28,6 +30,7 @@ The listener's app rebuilds the channel address from parameters it checks itself
 ## Reviews
 
 - **Contract:** independent review on 2026-11-14 found no critical or high issues. Fixed: refund skimming through a second output, the minimum refund output, token handling, and a domain tag on payment messages. Every rejection in the tests is pinned to the `require` line that must fail.
+- **Browser:** independent review on 2026-11-14. Fixed: the channel address and parameters were taken from the server unchecked (high), payments ahead depended on server-reported numbers (high), session reuse across wallets, an incomplete check of the signed funding transaction, possible double funding of one session, and several dead-ends; added a strict Content-Security-Policy.
 - **Server:** independent review on 2026-11-14. Fixed: missing automatic settlement (critical), a settle/pay race (high), unconfirmed-funding exposure, master-secret validation, rate limits, startup validation of the payout configuration, and refusing to reuse a `trackId` (key reuse).
 
 ## Known limitations

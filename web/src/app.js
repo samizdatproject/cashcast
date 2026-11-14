@@ -5,10 +5,12 @@ import Hls from 'hls.js/dist/hls.light.mjs';
 // Crypto and wallet code load only when the listener decides to pay, so the free minute starts fast.
 const lib = () => import('@bitauth/libauth');
 const walletLib = () => import('./wallet.js');
+const verifyLib = () => import('./verify.js');
 
 const $ = (sel) => document.querySelector(sel);
 const AHEAD = 5;                  // keys paid for ahead of the playing segment (≈20 s)
 const STORE = 'cashcast-session';
+const CLOSE_FEE_SATS = 700;       // when stopping before any paid key: covers the settlement fee so the rest returns now
 const EXPLORER = 'https://blockchair.com/bitcoin-cash/transaction/';
 const BLOCK_MINUTES = 10;
 
@@ -16,7 +18,7 @@ const state = {
   config: null, catalog: [], track: null, hls: null,
   session: null, sessionKey: null, wallet: null, budget: 0,
   bought: new Set(),              // paid keys this browser has fetched ("track/segment")
-  busy: false, approving: false, connecting: false,
+  busy: false, approving: false, connecting: false, signAbort: null,
 };
 
 // ---------- small helpers ----------
@@ -70,28 +72,42 @@ function step(name) {
 function showError(e) { $('#error').textContent = e ? (e.message || String(e)) : ''; }
 
 // ---------- payments ----------
-const price = () => state.session?.priceSatsPerSegment || state.config.priceSatsPerSegment;
+// The price per segment is pinned in this browser when the listener approves; the server can
+// never raise it. The number of keys to pay for is counted here too, so a lying server cannot
+// make the browser sign away more than ~5 segments ahead.
+function pinnedPrice() {
+  const s = state.session;
+  const pinned = s.pinnedPrice || state.config.priceSatsPerSegment;
+  if (s.priceSatsPerSegment && s.priceSatsPerSegment > pinned) throw new Error('The server asked for a higher price than you approved; payments stopped.');
+  return pinned;
+}
 
-// Keep `AHEAD` paid keys in hand, never past the end of the current track. The signed total is
-// the only thing the session key ever signs.
+async function signTotal(amount) {
+  const s = state.session;
+  const { secp256k1, sha256 } = await lib();
+  const sig = toHex(secp256k1.signMessageHashSchnorr(state.sessionKey, sha256.hash(payMessage(s.funding.txid, s.funding.vout, amount))));
+  Object.assign(s, await api(`/api/sessions/${s.id}/pay`, { method: 'POST', body: { amount, sig }, auth: true }));
+  save();
+}
+
+// Keep `AHEAD` paid keys in hand, never past the end of the current track.
 async function ensureCredits() {
   const s = state.session;
   if (!s || s.status !== 'funded' || state.busy) return;
+  const price = pinnedPrice();
   const t = state.track;
   const boughtHere = [...state.bought].filter((k) => k.startsWith(`${t.trackId}/`)).length;
   const leftInTrack = Math.max(0, t.keyHashes.length - state.config.freeSegments - boughtHere);
-  const target = Math.max(s.used, state.bought.size) + Math.min(AHEAD, leftInTrack);
-  if (s.credits >= target) return;
-  const cap = Math.min(s.funding.satoshis, state.config.maxSpend);
-  const amount = Math.min(target * price(), cap);
+  const paidCredits = Math.floor(s.paidAmount / price);
+  // Keys used so far: our own count, or the server's (after a reload) but never more than we paid for.
+  const used = Math.max(state.bought.size, Math.min(s.used || 0, paidCredits));
+  const target = used + Math.min(AHEAD, leftInTrack);
+  if (paidCredits >= target) return;
+  const cap = Math.min(s.funding.satoshis, state.budgetCap || Infinity, state.config.maxSpend);
+  const amount = Math.min(target, Math.floor(cap / price)) * price;
   if (amount <= s.paidAmount) { step('budget'); return; }
   state.busy = true;
-  try {
-    const { secp256k1, sha256 } = await lib();
-    const sig = toHex(secp256k1.signMessageHashSchnorr(state.sessionKey, sha256.hash(payMessage(s.funding.txid, s.funding.vout, amount))));
-    Object.assign(s, await api(`/api/sessions/${s.id}/pay`, { method: 'POST', body: { amount, sig }, auth: true }));
-    save(); renderMeter();
-  } finally { state.busy = false; }
+  try { await signTotal(amount); renderMeter(); } finally { state.busy = false; }
 }
 
 async function startSession(listenerAddress) {
@@ -119,6 +135,11 @@ async function waitForFunding() {
 
 async function settle() {
   $('#audio').pause();
+  // Stopped before any paid key: sign just the settlement fee so the rest comes back now,
+  // instead of after the ~1 day timeout.
+  if (state.session.status === 'funded' && state.session.paidAmount === 0 && state.session.funding.satoshis > CLOSE_FEE_SATS + 546) {
+    await signTotal(CLOSE_FEE_SATS);
+  }
   const s = await api(`/api/sessions/${state.session.id}/settle`, { method: 'POST', auth: true });
   Object.assign(state.session, s); save();
   if (s.status === 'settled') {
@@ -173,7 +194,7 @@ function play(track, autoplay = true) {
   state.hls = hls;
   $('#title').textContent = track.title;
   $('#artist').textContent = track.artist;
-  $('#license').href = track.license;
+  $('#license').href = /^https:\/\//.test(track.license) ? track.license : '#';
   $('#dur').textContent = fmtTime(track.durationSeconds);
   $('#freezone').style.width = `${Math.min(100, (state.config.freeSegments * 4 / track.durationSeconds) * 100)}%`;
   renderTracks();
@@ -266,11 +287,19 @@ async function connectWallet() {
     $('#refund').textContent = state.wallet.refundAddress;
     renderChips();
     step('approve');
-  } catch (e) { showError(e); step('free'); }
+  } catch (e) { if (e.name !== 'AbortError') showError(e); step('free'); }
   finally { state.connecting = false; }
 }
 
 // One approval at a time: a double click must never open two sessions or sign twice.
+async function ownRefundPkh() {
+  if (!state.config.dev) return (await walletLib()).refundPkh();
+  const { decodeCashAddress, binToHex } = await lib();
+  const d = decodeCashAddress(state.wallet.refundAddress);
+  if (typeof d === 'string') throw new Error('Dev mode: enter a valid refund address');
+  return binToHex(d.payload);
+}
+
 async function approve() {
   if (state.approving) return;
   state.approving = true;
@@ -278,29 +307,43 @@ async function approve() {
   showError('');
   try {
     const satoshis = state.budget;
-    if (!state.session || state.session.status !== 'open') await startSession(state.wallet.refundAddress);
+    const ownPkh = await ownRefundPkh();
+    // Reuse an unfunded session only if it belongs to this wallet; otherwise start a new one.
+    const reusable = state.session?.status === 'open' && state.session.params.userPkh === ownPkh;
+    if (!reusable) await startSession(state.wallet.refundAddress);
+    state.session.pinnedPrice = state.session.pinnedPrice || state.config.priceSatsPerSegment;
+    state.budgetCap = satoshis;
+    const { secp256k1 } = await lib();
+    (await verifyLib()).checkChannel({ session: state.session, ownPkh, satoshis, dev: state.config.dev,
+      ownSessionPk: toHex(secp256k1.derivePublicKeyCompressed(state.sessionKey)) });
+    save();
     $('#signamount').textContent = `${money(satoshis)} (${satoshis.toLocaleString()} sats)`;
     $('#fundstep').textContent = 'Check your wallet';
     step('signing');
-    if (state.config.dev) {
-      await api('/api/dev/fund', { method: 'POST', body: { address: state.session.address, satoshis } });
-    } else {
-      const signed = await (await walletLib()).fund({ contractAddress: state.session.address, satoshis, api });
-      $('#fundstep').textContent = 'Sending…';
-      // If sending fails (e.g. the wallet already broadcast it) the payment may still arrive;
-      // waitForFunding finds out either way.
-      await api('/api/broadcast', { method: 'POST', body: { hex: signed.hex } }).catch((e) => console.warn('broadcast:', e.message));
+    if ((await refreshSession()).status !== 'funded') {
+      if (state.config.dev) {
+        await api('/api/dev/fund', { method: 'POST', body: { address: state.session.address, satoshis } });
+      } else {
+        // A funding signed earlier for this session is re-sent, never signed a second time.
+        if (!state.session.signedHex) {
+          state.signAbort = new AbortController();
+          const signed = await (await walletLib()).fund({ contractAddress: state.session.address, satoshis, api, signal: state.signAbort.signal });
+          state.session.signedHex = signed.hex; save();
+        }
+        $('#fundstep').textContent = 'Sending…';
+        await api('/api/broadcast', { method: 'POST', body: { hex: state.session.signedHex } }).catch((e) => console.warn('broadcast:', e.message));
+      }
+      $('#fundstep').textContent = 'Waiting for the network…';
+      await waitForFunding();
     }
-    $('#fundstep').textContent = 'Waiting for the network…';
-    await waitForFunding();
     step('funded');
     $('.panel').classList.remove('nudge');
     await ensureCredits();
     renderMeter();
     $('#audio').play().catch(() => {});
     state.hls?.startLoad();
-  } catch (e) { showError(e); step('approve'); }
-  finally { state.approving = false; btn.disabled = false; btn.textContent = 'Approve'; }
+  } catch (e) { showError(e.name === 'AbortError' ? 'Cancelled.' : e); step('approve'); }
+  finally { state.approving = false; state.signAbort = null; btn.disabled = false; btn.textContent = 'Approve'; }
 }
 
 // ---------- start ----------
@@ -309,10 +352,13 @@ async function resume() {
   if (!saved) return;
   state.sessionKey = fromHex(saved.sessionKey); delete saved.sessionKey;
   state.session = saved;
-  try { await refreshSession(); } catch { state.session = null; save(); return; }
+  try { await refreshSession(); } catch (e) {
+    if (e.status === 401 || e.status === 404) { state.session = null; save(); }
+    return; // transient error: keep the session for the next visit
+  }
   const s = state.session;
   if (s.status === 'funded' && s.height < s.params.timeout - 12) { step('funded'); renderMeter(); return; }
-  if (['funded', 'expired', 'closed'].includes(s.status)) { showWaiting(s); return; }
+  if (['funded', 'expired', 'closed', 'settling'].includes(s.status)) { showWaiting(s); return; }
   if (s.status === 'open') return; // never funded: the next approval reuses it
   state.session = null; save();       // settled or refunded: done
 }
@@ -353,7 +399,8 @@ async function init() {
       $('#settletx').href = EXPLORER + r.refundTxid; step('settled');
     } catch (e) { showError(e); }
   };
-  $('#cancelpair').onclick = (e) => { e.preventDefault(); step('free'); };
+  $('#cancelpair').onclick = async (e) => { e.preventDefault(); (await walletLib()).cancelPairing(); step('free'); };
+  $('#cancelsign').onclick = (e) => { e.preventDefault(); state.signAbort?.abort(); };
   $('#switchwallet').onclick = async (e) => { e.preventDefault(); (await walletLib()).forgetWallet(); state.wallet = null; step('free'); connectWallet(); };
 }
 

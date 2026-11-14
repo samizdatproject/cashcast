@@ -8,7 +8,7 @@
   "scripts": {
     "build:contract": "cashc contracts/CashCastChannel.cash -o contracts/CashCastChannel.json",
     "test": "npm run build:contract && node --test test/*.test.js",
-    "build:web": "esbuild web/src/app.js --bundle --splitting --format=esm --target=es2022 --minify --outdir=web/dist",
+    "build:web": "rm -rf web/dist && esbuild web/src/app.js --bundle --splitting --format=esm --target=es2022 --minify --outdir=web/dist --define:CASHCAST_PROVIDER_PK=\\\"${CASHCAST_PROVIDER_PK:-}\\\"",
     "dev": "npm run build:contract && npm run build:web && node src/main.js"
   },
   "dependencies": {

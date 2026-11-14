@@ -4,7 +4,7 @@ import { initiateDappRelay } from '@wizardconnect/core';
 import { sourceOutputToRelay, transactionToHex } from '@wizardconnect/core/hdwalletv1-serialize';
 import { DappConnectionManager, loadSession, saveSession, clearSession } from '@wizardconnect/dapp';
 import {
-  hash160, encodeCashAddress, cashAddressToLockingBytecode, hexToBin, decodeTransaction, hashTransaction,
+  hash160, encodeCashAddress, cashAddressToLockingBytecode, hexToBin, binToHex, decodeTransaction, hashTransaction,
   decodeHdPublicKey, deriveHdPathRelative,
 } from '@bitauth/libauth';
 import qrcode from 'qrcode-generator';
@@ -14,7 +14,7 @@ const SCAN = 10;          // addresses per branch to look for coins
 const FEE_RATE = 1.2;     // sat/byte, a little above the 1 sat/byte relay minimum
 const DUST = 546;
 
-let manager = null, relay = null;
+let manager = null, relay = null, cancelPending = null;
 const SESSION_KEY = 'cashcast-wallet';
 
 // Wallets share one xpub per branch. The library maps the names "receive"/"change"; if a wallet
@@ -42,6 +42,12 @@ function loadFallbackNodes() {
   const receive = byName('receive') ?? nodes[0]?.d.node, change = byName('change') ?? nodes[1]?.d.node ?? receive;
   if (receive) fallbackNodes.set(RECEIVE, receive);
   if (change) fallbackNodes.set(CHANGE, change);
+}
+
+// The 20-byte hash of the listener's refund key (receive/0), for checking the channel.
+export function refundPkh() {
+  const pk = pubkeyAt(RECEIVE, 0);
+  return pk && binToHex(hash160(pk));
 }
 
 // A wallet paired earlier (this browser remembers it, including its public addresses).
@@ -76,8 +82,15 @@ export function reconnect(onStatus) {
 
 // Pair a new wallet: show a QR code (and a link for wallets on the same device); resolve once
 // the wallet has shared its addresses.
+export function cancelPairing() {
+  cancelPending?.(Object.assign(new Error('Cancelled.'), { name: 'AbortError' }));
+  cancelPending = null;
+  manager?.removeAllListeners(); relay?.cleanup(); manager = relay = null;
+}
+
 export function connect(qrElement, linkElement, onStatus) {
   return new Promise((resolve, reject) => {
+    cancelPending = reject;
     newManager(onStatus);
     const qr = qrcode(0, 'M');
     qr.addData(relay.qrUri);
@@ -86,7 +99,7 @@ export function connect(qrElement, linkElement, onStatus) {
     linkElement.href = relay.uri;
     // Some wallets (Selene) send a first wallet_ready with no paths and a second one with the
     // xpubs once they have seen dapp_ready. Wait for the one we can derive an address from.
-    const giveUp = setTimeout(() => reject(new Error('The wallet connected but did not share an address. Please try again.')), 30_000);
+    const giveUp = setTimeout(() => reject(new Error('No wallet connected. Please scan the code again.')), 180_000);
     const onReady = () => {
       loadFallbackNodes();
       const refundAddress = addressAt(RECEIVE, 0);
@@ -102,11 +115,12 @@ export function connect(qrElement, linkElement, onStatus) {
 }
 
 // Build the funding transaction, have the wallet sign it, and return the signed hex.
-export async function fund({ contractAddress, satoshis, api }) {
+export async function fund({ contractAddress, satoshis, api, signal }) {
   const paths = [];
   for (const branch of [RECEIVE, CHANGE]) for (let i = 0; i < SCAN; i++) paths.push({ branch, i, address: addressAt(branch, i) });
   const byAddress = new Map(paths.filter((p) => p.address).map((p) => [p.address, p]));
   const coins = (await api('/api/utxos', { method: 'POST', body: { addresses: [...byAddress.keys()] } }))
+    .filter((c) => byAddress.has(c.address))   // only coins at our own addresses
     .sort((a, b) => b.satoshis - a.satoshis);
 
   const contractLock = cashAddressToLockingBytecode(contractAddress).bytecode;
@@ -136,20 +150,23 @@ export async function fund({ contractAddress, satoshis, api }) {
     return [n, p.branch === RECEIVE ? 'receive' : 'change', p.i];
   });
 
+  const unsignedHex = transactionToHex(inputs, outputs);
   const res = await manager.signTransaction({
     transaction: {
-      transaction: transactionToHex(inputs, outputs),
+      transaction: unsignedHex,
       sourceOutputs: sourceOutputs.map(sourceOutputToRelay),
       broadcast: false,
       userPrompt: `CashCast listening budget: ${satoshis.toLocaleString()} sats. Unspent money returns to you automatically.`,
     },
     inputPaths,
-  });
+  }, { signal });
   if (res.error || !res.signedTransaction) throw new Error(res.error || 'The wallet did not sign');
   const signed = res.signedTransaction;
-  // Check the wallet signed what we asked: same outputs, nothing added.
+  // Check the wallet signed exactly what we asked: with the signatures blanked out, the signed
+  // transaction must re-encode to the same bytes we sent (inputs, outputs, version, locktime).
   const tx = decodeTransaction(hexToBin(signed));
   if (typeof tx === 'string') throw new Error(`wallet returned an invalid transaction: ${tx}`);
-  if (tx.outputs.length !== outputs.length || tx.outputs[0].valueSatoshis !== BigInt(satoshis)) throw new Error('wallet changed the transaction');
+  const blanked = transactionToHex(tx.inputs.map((i) => ({ ...i, unlockingBytecode: new Uint8Array() })), tx.outputs, tx.version, tx.locktime);
+  if (blanked !== unsignedHex) throw new Error('The wallet returned a different transaction; nothing was sent.');
   return { hex: signed, txid: hashTransaction(hexToBin(signed)) };
 }

@@ -153,6 +153,26 @@ export function buildServer(cfg) {
     return send();
   });
 
+  // Wallet helpers for the funding step. The browser derives the listener's addresses from the
+  // wallet's xpubs; the server only looks up plain (non-token) coins and relays the signed transaction.
+  app.post('/api/utxos', { config: { rateLimit: { max: 30, timeWindow: '1 minute' } } }, async (req, reply) => {
+    const addresses = req.body?.addresses;
+    if (!Array.isArray(addresses) || addresses.length === 0 || addresses.length > 40) return reply.code(400).send({ error: '1–40 addresses' });
+    const out = [];
+    for (const address of addresses) {
+      try { listenerPkh(String(address)); } catch { return reply.code(400).send({ error: `not a P2PKH address: ${address}` }); }
+      for (const u of await provider.getUtxos(String(address))) {
+        if (!u.token) out.push({ address, txid: u.txid, vout: u.vout, satoshis: Number(u.satoshis) });
+      }
+    }
+    return out;
+  });
+  app.post('/api/broadcast', { config: { rateLimit: { max: 10, timeWindow: '1 minute' } } }, async (req, reply) => {
+    const hex = String(req.body?.hex || '');
+    if (!/^[0-9a-f]{120,200000}$/.test(hex)) return reply.code(400).send({ error: 'bad transaction hex' });
+    try { return { txid: await provider.sendRawTransaction(hex) }; } catch (e) { return reply.code(400).send({ error: e.message }); }
+  });
+
   // Settle a session on-chain (the listener pressed stop, or the sweeper found it idle or near its timeout).
   // The session is first moved to 'settling', which freezes it: /pay and /k only serve 'funded'
   // sessions, so nothing can be bought after the settled total is read.

@@ -1,7 +1,11 @@
 // CashCast player. Plays the free first minute at once; after that a throwaway session key in this
 // browser signs a growing total, and the server sells one segment key per credit.
-import Hls from 'hls.js';
-import { secp256k1, sha256, generatePrivateKey, binToHex, hexToBin } from '@bitauth/libauth';
+import Hls from 'hls.js/dist/hls.light.mjs';
+// Crypto and wallet code load only when the listener decides to pay, so the free minute starts fast.
+const lib = () => import('@bitauth/libauth');
+const walletLib = () => import('./wallet.js');
+const toHex = (b) => [...b].map((x) => x.toString(16).padStart(2, '0')).join('');
+const fromHex = (h) => Uint8Array.from(h.match(/../g) || [], (x) => parseInt(x, 16));
 
 const $ = (sel) => document.querySelector(sel);
 const AHEAD = 5;                 // keys paid for ahead of the playing segment (≈20 s)
@@ -21,20 +25,20 @@ async function api(path, { method = 'GET', body, auth = false } = {}) {
 }
 function save() {
   try {
-    if (state.session) localStorage.setItem(STORE, JSON.stringify({ ...state.session, sessionKey: binToHex(state.sessionKey) }));
+    if (state.session) localStorage.setItem(STORE, JSON.stringify({ ...state.session, sessionKey: toHex(state.sessionKey) }));
     else localStorage.removeItem(STORE);
   } catch { /* storage unavailable: the session simply won't survive a reload */ }
 }
 function restore() {
   try {
     const saved = JSON.parse(localStorage.getItem(STORE) || 'null');
-    if (saved && saved.status !== 'settled') { state.sessionKey = hexToBin(saved.sessionKey); delete saved.sessionKey; state.session = saved; }
+    if (saved && saved.status !== 'settled') { state.sessionKey = fromHex(saved.sessionKey); delete saved.sessionKey; state.session = saved; }
   } catch { /* ignore */ }
 }
 const u32le = (n) => { const b = new Uint8Array(4); new DataView(b.buffer).setUint32(0, n, true); return b; };
 const u64le = (n) => { const b = new Uint8Array(8); new DataView(b.buffer).setBigUint64(0, BigInt(n), true); return b; };
 function payMessage(txid, vout, amount) {
-  const parts = [new TextEncoder().encode('CC01'), hexToBin(txid).reverse(), u32le(vout), u64le(amount)];
+  const parts = [new TextEncoder().encode('CC01'), fromHex(txid).reverse(), u32le(vout), u64le(amount)];
   const out = new Uint8Array(48); let o = 0;
   for (const p of parts) { out.set(p, o); o += p.length; }
   return out;
@@ -58,16 +62,18 @@ async function ensureCredits() {
   if (amount <= s.paidAmount) { showCard('budget'); return; }
   state.busy = true;
   try {
+    const { secp256k1, sha256 } = await lib();
     const msg = payMessage(s.funding.txid, s.funding.vout, amount);
-    const sig = binToHex(secp256k1.signMessageHashSchnorr(state.sessionKey, sha256.hash(msg)));
+    const sig = toHex(secp256k1.signMessageHashSchnorr(state.sessionKey, sha256.hash(msg)));
     Object.assign(s, await api(`/api/sessions/${s.id}/pay`, { method: 'POST', body: { amount, sig }, auth: true }));
     save(); render();
   } finally { state.busy = false; }
 }
 
 async function startSession(listenerAddress) {
+  const { generatePrivateKey, secp256k1 } = await lib();
   state.sessionKey = generatePrivateKey();
-  const sessionPk = binToHex(secp256k1.derivePublicKeyCompressed(state.sessionKey));
+  const sessionPk = toHex(secp256k1.derivePublicKeyCompressed(state.sessionKey));
   state.session = await api('/api/sessions', { method: 'POST', body: { listenerAddress, sessionPk } });
   state.bought.clear();
   save(); render();
@@ -172,23 +178,56 @@ async function init() {
   render();
   if (state.catalog[0]) play(state.catalog[0]);
 
-  $('#approve').onclick = async () => {
+  // Step 1: pair the wallet (QR code). Step 2: approve the budget (one signature in the wallet).
+  $('#connect').onclick = async () => {
+    if (state.connecting) return;
+    state.connecting = true;
     try {
       showError('');
-      const address = $('#listener').value.trim();
-      if (!state.session) await startSession(address);
+      if (state.config.dev) { state.wallet = { walletName: 'dev', refundAddress: $('#listener').value.trim() }; showCard('approve'); return; }
+      const w = await walletLib();
+      showCard('pair');
+      state.wallet = await w.connect($('#qr'), $('#walletlink'), (st) => { $("#relaystatus").textContent = `relay ${st?.status || st}`; });
+      $('#walletname').textContent = state.wallet.walletName || 'your wallet';
+      $('#refund').textContent = state.wallet.refundAddress;
+      showCard('approve');
+    } catch (e) { showError(e); showCard('continue'); }
+    finally { state.connecting = false; }
+  };
+  // One approval at a time: a double click must never open two sessions or sign twice.
+  $('#approve').onclick = async () => {
+    if (state.approving) return;
+    state.approving = true;
+    const btn = $('#approve'); btn.disabled = true; btn.textContent = 'Approving…';
+    try {
+      showError('');
+      const satoshis = Number($('#budget').value);
+      if (!state.session) await startSession(state.wallet.refundAddress);
       showCard('funding');
       $('#contract').textContent = state.session.address;
-      if (state.config.dev) await api('/api/dev/fund', { method: 'POST', body: { address: state.session.address, satoshis: Number($('#budget').value) } });
+      if (state.config.dev) {
+        await api('/api/dev/fund', { method: 'POST', body: { address: state.session.address, satoshis } });
+      } else {
+        $('#fundstep').textContent = 'Approve the payment in your wallet…';
+        const signed = await (await walletLib()).fund({ contractAddress: state.session.address, satoshis, api });
+        $('#fundstep').textContent = 'Sending…';
+        // If sending fails (e.g. the wallet already broadcast it), the payment may still have
+        // arrived; waitForFunding below finds out either way.
+        await api('/api/broadcast', { method: 'POST', body: { hex: signed.hex } }).catch((e) => console.warn('broadcast:', e.message));
+      }
+      $('#fundstep').textContent = 'Waiting for the network…';
       await waitForFunding();
       showCard('none');
       await ensureCredits();
       $('#audio').play().catch(() => {});
       state.hls?.startLoad();
-    } catch (e) { showError(e); }
+    } catch (e) { showError(e); showCard('approve'); }
+    finally { state.approving = false; btn.disabled = false; btn.textContent = 'Approve budget'; }
   };
+  $('#early').onclick = (e) => { e.preventDefault(); if (state.session?.status !== 'funded') showCard('continue'); };
   $('#stop').onclick = () => stopAndSettle().catch(showError);
-  $('#new').onclick = () => { state.session = null; save(); showCard('none'); render(); };
+  $('#new').onclick = () => { state.session = null; state.bought.clear(); save(); showCard('none'); render(); };
+  $('#listener').hidden = !state.config.dev;
   if (state.session?.status === 'funded') showCard('none');
 }
 

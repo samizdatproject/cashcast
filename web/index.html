@@ -32,7 +32,7 @@
 
   <div id="now">Loading…</div>
   <audio id="audio" controls></audio>
-  <div class="mut"><span id="rate"></span> · <a id="license" target="_blank" rel="noopener">licence</a></div>
+  <div class="mut"><span id="rate"></span> · <a id="license" target="_blank" rel="noopener">licence</a> · <a href="#" id="early">connect wallet</a></div>
 
   <section id="meter" hidden>
     <div class="row"><span>Approved</span><b id="approved"></b></div>
@@ -44,13 +44,23 @@
 
   <section class="card" data-card="continue" hidden>
     <b>Keep listening?</b>
-    <p class="mut">Approve a small budget once. You pay only for the seconds you play; the rest returns to your wallet.</p>
-    <input id="listener" placeholder="Your Bitcoin Cash address (refunds go here)">
-    <select id="budget"><option value="20000">20,000 sats</option><option value="50000" selected>50,000 sats</option><option value="100000">100,000 sats</option></select>
+    <p class="mut">Connect a Bitcoin Cash wallet (Selene, Paytaca, Cashonize) and approve a small budget once. You pay only for the seconds you play; the rest returns to your wallet.</p>
+    <input id="listener" placeholder="Dev mode: refund address" hidden>
+    <button class="main" id="connect">Connect wallet</button>
+  </section>
+  <section class="card" data-card="pair" hidden>
+    <b>Scan with your wallet</b>
+    <div id="qr" style="max-width:240px;margin:12px auto;background:#fff;border-radius:8px"></div>
+    <p class="mut">On this device? <a id="walletlink">Open in wallet</a> · <span id="relaystatus"></span></p>
+  </section>
+  <section class="card" data-card="approve" hidden>
+    <b>Connected to <span id="walletname"></span></b>
+    <p class="mut">Unspent money returns to <code id="refund"></code></p>
+    <select id="budget"><option value="20000" selected>20,000 sats</option><option value="50000">50,000 sats</option><option value="100000">100,000 sats</option></select>
     <button class="main" id="approve">Approve budget</button>
   </section>
   <section class="card" data-card="funding" hidden>
-    <b>Waiting for your payment…</b>
+    <b id="fundstep">Waiting for your payment…</b>
     <p class="mut">Channel contract: <code id="contract"></code></p>
   </section>
   <section class="card" data-card="budget" hidden>
@@ -64,6 +74,6 @@
 
   <ul id="tracks"></ul>
   <p class="mut">Demo catalogue: CC0 tracks. In production, artists register their own Bitcoin Cash address.</p>
-  <script type="module" src="/app.js"></script>
+  <script type="module" src="/dist/app.js"></script>
 </body>
 </html>

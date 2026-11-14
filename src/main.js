@@ -44,7 +44,7 @@ if (payouts.some((p) => !p.address)) {
 
 const app = buildServer({
   provider, db: openDb(network === 'mock' ? ':memory:' : join(root, `cashcast-${network}.db`)), masterSecret, providerKey,
-  mediaDir: join(root, 'media'), payouts, logger: { level: 'info' }, dev: network === 'mock',
+  mediaDir: join(root, 'media', network), payouts, logger: { level: 'info' }, dev: network === 'mock',
   priceSatsPerSegment: Number(process.env.CASHCAST_PRICE_SATS_PER_SEGMENT || 150),
 });
 
@@ -65,6 +65,6 @@ if (network === 'mock') {
 }
 
 // Settle idle sessions every minute.
-setInterval(() => app.sweep().catch((e) => app.log.error(e)), 60_000).unref();
+if (process.env.CASHCAST_SWEEP !== 'off') setInterval(() => app.sweep().catch((e) => app.log.error(e)), 60_000).unref();
 
 await app.listen({ port: Number(process.env.PORT || 8787), host: process.env.HOST || '127.0.0.1' });

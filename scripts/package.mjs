@@ -64,6 +64,6 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   const [input, trackId, title, artist, license] = process.argv.slice(2);
   if (!license) throw new Error('usage: package.mjs <audio> <trackId> "<title>" "<artist>" "<license url>"');
   const m = packageTrack({ input, trackId, title, artist, license, master: loadMasterSecret(),
-    outRoot: new URL('../media', import.meta.url).pathname });
+    outRoot: join(new URL('../media', import.meta.url).pathname, process.env.CASHCAST_NETWORK || 'mock') });
   console.log(`${m.trackId}: ${m.keyHashes.length} segments, ${m.durationSeconds}s`);
 }

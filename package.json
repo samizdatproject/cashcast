@@ -8,18 +8,21 @@
   "scripts": {
     "build:contract": "cashc contracts/CashCastChannel.cash -o contracts/CashCastChannel.json",
     "test": "npm run build:contract && node --test test/*.test.js",
-    "build:web": "esbuild web/src/app.js --bundle --format=esm --target=es2022 --minify --outfile=web/app.js",
+    "build:web": "esbuild web/src/app.js --bundle --splitting --format=esm --target=es2022 --minify --outdir=web/dist",
     "dev": "npm run build:contract && npm run build:web && node src/main.js"
   },
   "dependencies": {
     "@bitauth/libauth": "^3.0.0",
     "@fastify/rate-limit": "^11.2.2",
     "@fastify/static": "^10.1.11",
+    "@wizardconnect/core": "^0.2.10",
+    "@wizardconnect/dapp": "^0.2.7",
     "better-sqlite3": "^13.2.0",
     "cashc": "^0.14.0",
     "cashscript": "^0.14.0",
     "fastify": "^5.12.8",
-    "hls.js": "^1.7.4"
+    "hls.js": "^1.7.4",
+    "qrcode-generator": "^2.0.4"
   },
   "devDependencies": {
     "esbuild": "^0.28.2"

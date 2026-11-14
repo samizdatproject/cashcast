@@ -182,7 +182,11 @@ test('the sweeper settles a busy session that is near its timeout, but never at 
   s2 = { ...(await fund(w2, s2)), token: s2.token };
   await pay(w2, s2, 3_000);
   w2.provider.setBlockHeight(s2.params.timeout);
-  assert.equal((await w2.app.sweep()).length, 0, 'at the timeout the refund could win: do not broadcast');
+  assert.equal((await w2.app.settleSession(s2.id)), null, 'at the timeout a settle could lose to the refund: do not broadcast it');
+  // ...so the sweeper returns the whole channel to the listener instead.
+  assert.equal((await w2.app.sweep()).length, 1);
+  const after = (await w2.app.inject({ method: 'GET', url: `/api/sessions/${s2.id}`, headers: authed(s2) })).json();
+  assert.equal(after.status, 'refunded');
 });
 
 test('totals above the per-session limit are refused (bounds the cost of a double-spent funding)', async () => {
@@ -198,4 +202,38 @@ test('bad configuration fails at startup', () => {
   assert.throws(() => buildServer({ ...base, payouts: [{ address: addr(), bps: 9000 }] }), /sum to 10000/);
   assert.throws(() => buildServer({ ...base, payouts: [{ address: 'nonsense', bps: 10000 }] }));
   assert.throws(() => buildServer({ ...base, masterSecret: Buffer.alloc(0), payouts: [{ address: addr(), bps: 10000 }] }), /32 bytes/);
+});
+
+test('a session keeps the price it opened with, even if the BCH price moves', async () => {
+  let usd = 200;
+  const w = world({ centsPerMinute: 1, usdPrice: async () => usd });
+  const cfg = (await w.app.inject({ method: 'GET', url: '/api/config' })).json();
+  assert.equal(cfg.priceSatsPerSegment, 333); // 1¢/min at $200 = 5,000 sats/min = 333 per 4 s
+  let s = await openSession(w);
+  usd = 100;
+  assert.equal((await w.app.inject({ method: 'GET', url: '/api/config' })).json().priceSatsPerSegment, 667);
+  s = { ...(await fund(w, s)), token: s.token };
+  const r = (await pay(w, s, 666)).json();
+  assert.equal(r.credits, 2);
+  assert.equal(r.priceSatsPerSegment, 333);
+});
+
+test('after the timeout an unsettled channel is refunded to the listener (button or sweeper)', async () => {
+  const w = world();
+  let s = await openSession(w);
+  s = { ...(await fund(w, s)), token: s.token };
+  const early = await w.app.inject({ method: 'POST', url: `/api/sessions/${s.id}/refund` });
+  assert.equal(early.statusCode, 409);
+  w.provider.setBlockHeight(s.params.timeout);
+  const res = await w.app.inject({ method: 'POST', url: `/api/sessions/${s.id}/refund` });
+  assert.equal(res.statusCode, 200, res.body);
+  assert.equal(res.json().status, 'refunded');
+  const back = (await w.provider.getUtxosForLockingBytecode(cashAddressToLockingBytecode(w.listener.address).bytecode)).reduce((t, u) => t + u.satoshis, 0n);
+  assert.ok(back > 19_000n && back < 20_000n, `${back}`);
+  // The sweeper does the same for any other expired channel.
+  let s2 = await openSession(w);
+  w.provider.setBlockHeight(s2.params.timeout - 200);
+  s2 = { ...(await fund(w, s2)), token: s2.token };
+  w.provider.setBlockHeight(s2.params.timeout);
+  assert.equal((await w.app.sweep()).length, 1);
 });

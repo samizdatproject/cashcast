@@ -83,4 +83,15 @@ export function buildSettle({ contract, provider, utxo, amount, sigHex, provider
   return make([...outputs, ...finalPayouts]);
 }
 
+// The keyless refund after the timeout: one output, the whole balance minus a fee ≤ maxRefundFee.
+export function buildRefund({ contract, utxo, userPkh, timeout, maxRefundFee, provider, feeRate = 1.2 }) {
+  const make = (fee) => new TransactionBuilder({ provider })
+    .addInput(utxo, contract.unlock.refund())
+    .addOutput({ to: p2pkhLock(hexToBin(userPkh)), amount: utxo.satoshis - fee })
+    .setLocktime(timeout);
+  const size = make(BigInt(maxRefundFee)).build().length / 2;
+  const fee = BigInt(Math.min(maxRefundFee, Math.ceil(size * feeRate)));
+  return make(fee);
+}
+
 export { binToHex };

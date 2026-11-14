@@ -8,21 +8,22 @@ import { readdirSync, readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { secp256k1, binToHex, hexToBin } from '@bitauth/libauth';
 import { segmentKey } from './keys.js';
-import { listenerPkh, channelContract, verifyPayment, buildSettle, lockOf } from './channel.js';
+import { listenerPkh, channelContract, verifyPayment, buildSettle, lockOf, buildRefund } from './channel.js';
 
 const sha256hex = (s) => createHash('sha256').update(s).digest('hex');
 
 export function loadCatalog(mediaDir) {
   if (!existsSync(mediaDir)) return [];
   return readdirSync(mediaDir).filter((d) => existsSync(join(mediaDir, d, 'manifest.json')))
-    .map((d) => JSON.parse(readFileSync(join(mediaDir, d, 'manifest.json'), 'utf8')));
+    .map((d) => JSON.parse(readFileSync(join(mediaDir, d, 'manifest.json'), 'utf8')))
+    .sort((a, b) => b.durationSeconds - a.durationSeconds); // longest first: the free minute is a smaller share
 }
 
 export function buildServer(cfg) {
   const {
     provider, db, masterSecret, providerKey, mediaDir, payouts,
-    priceSatsPerSegment = 150, freeSegments = 15, sessionBlocks = 144, safetyBlocks = 12,
-    maxRefundFee = 1000, minFunding = 5000, maxSpend = 200_000, idleMs = 10 * 60_000, fundingCheckMs = 5_000,
+    priceSatsPerSegment = 150, centsPerMinute = null, usdPrice = null, freeSegments = 15, sessionBlocks = 144, safetyBlocks = 12,
+    maxRefundFee = 1000, minFunding = 5000, maxSpend = 500_000, idleMs = 10 * 60_000, fundingCheckMs = 5_000,
     heightTtlMs = 30_000, dev = false, logger = false, rateLimitMax = 600,
   } = cfg;
   // Fail at startup, not at the first settlement: payouts must parse and add up to 100%.
@@ -43,7 +44,7 @@ export function buildServer(cfg) {
 
   const q = {
     insert: db.prepare(`INSERT INTO sessions (id, token_hash, listener_address, user_pkh, session_pk, timeout,
-      max_refund_fee, address, created_at, last_activity) VALUES (?,?,?,?,?,?,?,?,?,?)`),
+      max_refund_fee, address, created_at, last_activity, price_sats) VALUES (?,?,?,?,?,?,?,?,?,?,?)`),
     get: db.prepare('SELECT * FROM sessions WHERE id = ?'),
     fund: db.prepare(`UPDATE sessions SET funding_txid=?, funding_vout=?, funding_sats=?, status='funded' WHERE id=? AND status='open'`),
     pay: db.prepare('UPDATE sessions SET paid_amount=?, paid_sig=?, last_activity=? WHERE id=? AND paid_amount < ?'),
@@ -52,12 +53,25 @@ export function buildServer(cfg) {
     claimSettle: db.prepare(`UPDATE sessions SET status='settling' WHERE id=? AND status='funded'`),
     setStatus: db.prepare('UPDATE sessions SET status=? WHERE id=?'),
     due: db.prepare(`SELECT id FROM sessions WHERE status='funded' AND paid_amount > 0 AND (last_activity <= ? OR timeout - ? <= ?)`),
+    expired: db.prepare(`SELECT id FROM sessions WHERE status IN ('funded','expired','closed') AND timeout <= ?`),
+    refunded: db.prepare(`UPDATE sessions SET settle_txid=?, status='refunded' WHERE id=?`),
     isUnlocked: db.prepare('SELECT 1 FROM unlocked WHERE session_id=? AND track=? AND segment=?'),
     used: db.prepare('SELECT COUNT(*) AS n FROM unlocked WHERE session_id=?'),
     unlock: db.prepare('INSERT OR IGNORE INTO unlocked (session_id, track, segment) VALUES (?,?,?)'),
   };
+  // Price: either fixed sats per 4-second segment, or `centsPerMinute` converted with the live
+  // BCH/USD rate (`usdPrice()` → number or null). Each session keeps the price it opened with.
+  async function currentPrice() {
+    const usd = usdPrice ? await usdPrice() : null;
+    if (centsPerMinute && usd) {
+      const satsPerMinute = (centsPerMinute / 100 / usd) * 1e8;
+      return { sats: Math.max(1, Math.round(satsPerMinute / (60 / 4))), usd };
+    }
+    return { sats: priceSatsPerSegment, usd };
+  }
+  const priceOf = (s) => s.price_sats || priceSatsPerSegment;
   const params = (s) => ({ userPkh: s.user_pkh, sessionPk: s.session_pk, providerPk, timeout: s.timeout, maxRefundFee: s.max_refund_fee });
-  const credits = (s) => Math.floor(s.paid_amount / priceSatsPerSegment);
+  const credits = (s) => Math.floor(s.paid_amount / priceOf(s));
 
   // Bearer token check. The channel id is public; only the token (given once, at creation) is a credential.
   function tokenOk(s, headers) {
@@ -84,13 +98,19 @@ export function buildServer(cfg) {
     return q.get.get(s.id);
   }
 
-  const view = (s) => ({
+  const view = (s, height = heightCache.value) => ({
+    height, refundableFrom: s.timeout + 1,
     id: s.id, status: s.status, address: s.address, params: params(s),
     funding: s.funding_txid ? { txid: s.funding_txid, vout: s.funding_vout, satoshis: s.funding_sats } : null,
     paidAmount: s.paid_amount, credits: credits(s), used: q.used.get(s.id).n, settleTxid: s.settle_txid,
+    priceSatsPerSegment: priceOf(s),
   });
 
-  app.get('/api/config', async () => ({ providerPk, priceSatsPerSegment, freeSegments, sessionBlocks, maxRefundFee, minFunding, maxSpend, dev }));
+  app.get('/api/config', async () => {
+    const price = await currentPrice();
+    return { providerPk, priceSatsPerSegment: price.sats, usdPerBch: price.usd, centsPerMinute, freeSegments, sessionBlocks,
+      maxRefundFee, minFunding, maxSpend, dev };
+  });
   app.get('/api/catalog', async () => catalog);
 
   app.post('/api/sessions', { config: { rateLimit: { max: 10, timeWindow: '1 minute' } } }, async (req, reply) => {
@@ -102,13 +122,14 @@ export function buildServer(cfg) {
     const id = randomUUID(), token = randomBytes(32).toString('hex'), now = Date.now();
     const p = { userPkh, sessionPk, providerPk, timeout, maxRefundFee };
     const address = channelContract(p, provider).address;
-    q.insert.run(id, sha256hex(token), listenerAddress, userPkh, sessionPk, timeout, maxRefundFee, address, now, now);
+    q.insert.run(id, sha256hex(token), listenerAddress, userPkh, sessionPk, timeout, maxRefundFee, address, now, now, (await currentPrice()).sats);
     return reply.code(201).send({ ...view(q.get.get(id)), token });
   });
 
   app.get('/api/sessions/:id', async (req, reply) => {
     const s = auth(req, reply); if (!s) return reply;
-    return view(await refreshFunding(s));
+    const h = await height();
+    return view(await refreshFunding(s), h);
   });
 
   // The listener's browser sends its new running total, signed with the session key.
@@ -199,15 +220,43 @@ export function buildServer(cfg) {
     }
   }
 
-  // Settle sessions nobody closed: idle ones, and any that are getting near their timeout.
+  // Return a channel's whole balance to the listener after its timeout (the contract's keyless
+  // refund path). Anyone may trigger it; the money can only go to the listener.
+  async function refundSession(id) {
+    const s = q.get.get(id);
+    if (!s || !s.funding_txid || !['funded', 'expired', 'closed'].includes(s.status)) return null;
+    if ((await provider.getBlockHeight()) < s.timeout) return null;
+    const utxo = (await provider.getUtxos(s.address)).find((u) => u.txid === s.funding_txid && u.vout === s.funding_vout);
+    if (!utxo) return null;
+    const tx = buildRefund({ contract: channelContract(params(s), provider), utxo, userPkh: s.user_pkh,
+      timeout: s.timeout, maxRefundFee: s.max_refund_fee, provider });
+    const { txid } = await tx.send();
+    q.refunded.run(txid, id);
+    return txid;
+  }
+
+  // Settle sessions nobody closed (idle ones, and any getting near their timeout), and return
+  // the money of any channel that reached its timeout without a settlement.
   async function sweep() {
     const h = await provider.getBlockHeight();
     const done = [];
     for (const { id } of q.due.all(Date.now() - idleMs, safetyBlocks, h)) {
       try { const txid = await settleSession(id); if (txid) done.push(txid); } catch (e) { app.log.error({ id, err: e.message }, 'settle failed'); }
     }
+    for (const { id } of q.expired.all(h)) {
+      try { const txid = await refundSession(id); if (txid) done.push(txid); } catch (e) { app.log.error({ id, err: e.message }, 'refund failed'); }
+    }
     return done;
   }
+
+  app.post('/api/sessions/:id/refund', { config: { rateLimit: { max: 5, timeWindow: '1 minute' } } }, async (req, reply) => {
+    const s = q.get.get(req.params.id);
+    if (!s) return reply.code(404).send({ error: 'no such session' });
+    const h = await height();
+    if (h < s.timeout) return reply.code(409).send({ error: `refundable from block ${s.timeout + 1}`, height: h });
+    const txid = await refundSession(s.id);
+    return { ...view(q.get.get(s.id), h), refundTxid: txid };
+  });
 
   app.post('/api/sessions/:id/settle', async (req, reply) => {
     const s = auth(req, reply); if (!s) return reply;

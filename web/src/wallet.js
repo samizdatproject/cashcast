@@ -2,7 +2,7 @@
 // the one funding transaction (wallet coins → channel contract, change back to the wallet).
 import { initiateDappRelay } from '@wizardconnect/core';
 import { sourceOutputToRelay, transactionToHex } from '@wizardconnect/core/hdwalletv1-serialize';
-import { DappConnectionManager } from '@wizardconnect/dapp';
+import { DappConnectionManager, loadSession, saveSession, clearSession } from '@wizardconnect/dapp';
 import {
   hash160, encodeCashAddress, cashAddressToLockingBytecode, hexToBin, decodeTransaction, hashTransaction,
   decodeHdPublicKey, deriveHdPathRelative,
@@ -15,6 +15,7 @@ const FEE_RATE = 1.2;     // sat/byte, a little above the 1 sat/byte relay minim
 const DUST = 546;
 
 let manager = null, relay = null;
+const SESSION_KEY = 'cashcast-wallet';
 
 // Wallets share one xpub per branch. The library maps the names "receive"/"change"; if a wallet
 // names them differently, derive from the shared xpubs ourselves (first = receive, second = change).
@@ -43,14 +44,41 @@ function loadFallbackNodes() {
   if (change) fallbackNodes.set(CHANGE, change);
 }
 
-// Show a QR code (and a link for wallets on the same device); resolve once the wallet is ready.
+// A wallet paired earlier (this browser remembers it, including its public addresses).
+export function rememberedWallet() {
+  const st = loadSession(SESSION_KEY);
+  return st?.walletPublicKey && st.paths?.length ? { walletName: st.walletName || 'your wallet' } : null;
+}
+export function forgetWallet() {
+  try { manager?.sendDisconnect('user switched wallet'); } catch { /* ignore */ }
+  relay?.cleanup(); manager?.removeAllListeners(); manager = relay = null;
+  clearSession(SESSION_KEY);
+}
+
+function newManager(onStatus, existing) {
+  manager?.removeAllListeners();
+  relay?.cleanup();
+  manager = new DappConnectionManager('CashCast', `${location.origin}/icon.svg`, { session: { key: SESSION_KEY } });
+  relay = initiateDappRelay(({ client, status }) => { manager.updateConnection(client, status); onStatus?.(status?.status); },
+    existing ? { existingCredentials: existing } : undefined);
+  manager.attachRelay(relay);
+}
+
+// Reconnect to the remembered wallet without a QR code. Addresses come from the stored session;
+// the wallet itself only has to be online when it is asked to sign.
+export function reconnect(onStatus) {
+  const st = loadSession(SESSION_KEY);
+  newManager(onStatus, { privateKey: st.privateKey, secret: st.secret, walletPublicKey: st.walletPublicKey });
+  manager.restoreSessionPaths(st.paths);
+  loadFallbackNodes();
+  return { walletName: st.walletName || 'your wallet', refundAddress: addressAt(RECEIVE, 0) };
+}
+
+// Pair a new wallet: show a QR code (and a link for wallets on the same device); resolve once
+// the wallet has shared its addresses.
 export function connect(qrElement, linkElement, onStatus) {
   return new Promise((resolve, reject) => {
-    manager?.removeAllListeners();
-    relay?.cleanup();
-    manager = new DappConnectionManager('CashCast', `${location.origin}/icon.svg`, { session: false });
-    relay = initiateDappRelay(({ client, status }) => { manager.updateConnection(client, status); onStatus?.(status); });
-    manager.attachRelay(relay);
+    newManager(onStatus);
     const qr = qrcode(0, 'M');
     qr.addData(relay.qrUri);
     qr.make();
@@ -65,6 +93,7 @@ export function connect(qrElement, linkElement, onStatus) {
       if (!refundAddress) return; // keep waiting for the next wallet_ready
       clearTimeout(giveUp);
       manager.off('walletready', onReady);
+      saveSession(SESSION_KEY, { walletName: manager.walletName || undefined, paths: manager.getSessionPaths() });
       resolve({ walletName: manager.walletName, refundAddress });
     };
     manager.on('walletready', onReady);

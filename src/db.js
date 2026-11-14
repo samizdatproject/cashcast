@@ -25,5 +25,8 @@ export function openDb(file = ':memory:') {
       PRIMARY KEY (session_id, track, segment)
     );
   `);
+  // Added later: the per-segment price fixed when the session opened (sats).
+  const cols = db.prepare('PRAGMA table_info(sessions)').all().map((c) => c.name);
+  if (!cols.includes('price_sats')) db.exec('ALTER TABLE sessions ADD COLUMN price_sats INTEGER');
   return db;
 }

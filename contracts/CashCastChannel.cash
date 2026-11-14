@@ -1,0 +1,70 @@
+pragma cashscript ^0.14.0;
+
+// One listening session. The listener funds this contract once from their wallet (one approval).
+// While listening, their browser signs a running total off-chain with a throwaway session key;
+// CashCast keeps the highest total and settles once at the end. If CashCast never settles,
+// anyone can return the money to the listener after `timeout`, with no key at all.
+//
+// The contract protects only the listener. CashCast decides where its own share goes
+// (artist and platform outputs), because it must sign every settlement.
+//
+// The listener's app must rebuild this contract's address from parameters it has checked
+// itself (timeout is a block height in a sane range, maxRefundFee is small, funding is well
+// above maxRefundFee + 546) and fund only the plain, non-token address.
+contract CashCastChannel(
+    bytes20 userPkh,    // the listener's wallet address (P2PKH hash): unspent money always returns here
+    pubkey sessionPk,   // the listener's throwaway browser key; it signs running totals and nothing else
+    pubkey providerPk,  // CashCast's settlement key
+    int timeout,        // block height after which anyone may refund the listener
+    int maxRefundFee    // the most the keyless refund may spend on the network fee
+) {
+    // CashCast claims `amount`, the latest total the listener's session key signed.
+    // payMsg = "CC01" ‖ funding txid (32 bytes, internal byte order) ‖ vout (4 bytes LE) ‖ amount (8 bytes LE).
+    function settle(sig providerSig, datasig paySig, bytes payMsg) {
+        // One channel per transaction, so one refund output can never be counted for two channels.
+        require(tx.inputs.length == 1);
+        // Channels carry BCH only; a token sent here by mistake must not be taken.
+        require(tx.inputs[0].tokenCategory == 0x);
+        require(checkSig(providerSig, providerPk));
+        require(checkDataSig(paySig, payMsg, sessionPk));
+
+        // The fixed "CC01" tag means a signature over any other kind of message can never pass
+        // as a payment. The signed total names this exact channel (txid AND vout), so it cannot
+        // be replayed against another channel opened with the same keys.
+        require(payMsg.length == 48);
+        bytes tag, bytes rest = payMsg.split(4);
+        require(tag == 0x43433031);
+        bytes txid, bytes rest2 = rest.split(32);
+        require(txid == tx.inputs[0].outpointTransactionHash);
+        bytes vout, bytes amountBytes = rest2.split(4);
+        require(int(vout) == tx.inputs[0].outpointIndex);
+
+        // A total with the top bit set decodes as negative and fails here.
+        int amount = int(amountBytes);
+        int value = tx.inputs[0].value;
+        require(amount > 0);
+        require(amount <= value);
+
+        // Everything the listener did not spend goes back to them in output 0. Only when that
+        // remainder is below the network dust limit (546 sats) may it be left out, because such
+        // an output could not be relayed.
+        int remainder = value - amount;
+        if (remainder >= 546) {
+            require(tx.outputs[0].lockingBytecode == new LockingBytecodeP2PKH(userPkh));
+            require(tx.outputs[0].value >= remainder);
+        }
+    }
+
+    // After `timeout`, anyone can send the whole balance (minus at most maxRefundFee) back to the
+    // listener. No signature is needed: the only output is forced to the listener's address, so
+    // whoever broadcasts it can pay the network fee but cannot keep anything.
+    function refund() {
+        require(tx.inputs.length == 1);
+        require(tx.inputs[0].tokenCategory == 0x);
+        require(tx.time >= timeout);
+        require(tx.outputs.length == 1);
+        require(tx.outputs[0].lockingBytecode == new LockingBytecodeP2PKH(userPkh));
+        require(tx.outputs[0].value >= tx.inputs[0].value - maxRefundFee);
+        require(tx.outputs[0].value >= 546);
+    }
+}

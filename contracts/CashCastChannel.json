@@ -1,0 +1,60 @@
+{
+  "contractName": "CashCastChannel",
+  "constructorInputs": [
+    { "name": "userPkh", "type": "bytes20" },
+    { "name": "sessionPk", "type": "pubkey" },
+    { "name": "providerPk", "type": "pubkey" },
+    { "name": "timeout", "type": "int" },
+    { "name": "maxRefundFee", "type": "int" }
+  ],
+  "abi": [
+    {
+      "name": "settle",
+      "inputs": [
+        { "name": "providerSig", "type": "sig" },
+        { "name": "paySig", "type": "datasig" },
+        { "name": "payMsg", "type": "bytes" }
+      ]
+    },
+    { "name": "refund", "inputs": [] }
+  ],
+  "bytecode": "OP_5 OP_PICK OP_0 OP_NUMEQUAL OP_IF OP_TXINPUTCOUNT OP_1 OP_NUMEQUALVERIFY OP_0 OP_UTXOTOKENCATEGORY OP_0 OP_EQUALVERIFY OP_6 OP_ROLL OP_3 OP_ROLL OP_CHECKSIGVERIFY OP_5 OP_ROLL OP_6 OP_PICK OP_3 OP_ROLL OP_CHECKDATASIGVERIFY OP_4 OP_PICK OP_SIZE OP_NIP 30 OP_NUMEQUALVERIFY OP_4 OP_ROLL OP_4 OP_SPLIT OP_SWAP 43433031 OP_EQUALVERIFY 20 OP_SPLIT OP_SWAP OP_0 OP_OUTPOINTTXHASH OP_EQUALVERIFY OP_4 OP_SPLIT OP_SWAP OP_BIN2NUM OP_0 OP_OUTPOINTINDEX OP_NUMEQUALVERIFY OP_BIN2NUM OP_0 OP_UTXOVALUE OP_OVER OP_0 OP_GREATERTHAN OP_VERIFY OP_2DUP OP_LESSTHANOREQUAL OP_VERIFY OP_SWAP OP_SUB OP_DUP 2202 OP_GREATERTHANOREQUAL OP_IF OP_0 OP_OUTPUTBYTECODE 76a914 OP_3 OP_PICK OP_CAT 88ac OP_CAT OP_EQUALVERIFY OP_0 OP_OUTPUTVALUE OP_OVER OP_GREATERTHANOREQUAL OP_VERIFY OP_ENDIF OP_2DROP OP_2DROP OP_DROP OP_1 OP_ELSE OP_5 OP_ROLL OP_1 OP_NUMEQUALVERIFY OP_TXINPUTCOUNT OP_1 OP_NUMEQUALVERIFY OP_0 OP_UTXOTOKENCATEGORY OP_0 OP_EQUALVERIFY OP_3 OP_ROLL OP_CHECKLOCKTIMEVERIFY OP_DROP OP_TXOUTPUTCOUNT OP_1 OP_NUMEQUALVERIFY OP_0 OP_OUTPUTBYTECODE 76a914 OP_ROT OP_CAT 88ac OP_CAT OP_EQUALVERIFY OP_0 OP_OUTPUTVALUE OP_0 OP_UTXOVALUE OP_4 OP_ROLL OP_SUB OP_GREATERTHANOREQUAL OP_VERIFY OP_0 OP_OUTPUTVALUE 2202 OP_GREATERTHANOREQUAL OP_NIP OP_NIP OP_ENDIF",
+  "source": "pragma cashscript ^0.14.0;\n\n// One listening session. The listener funds this contract once from their wallet (one approval).\n// While listening, their browser signs a running total off-chain with a throwaway session key;\n// CashCast keeps the highest total and settles once at the end. If CashCast never settles,\n// anyone can return the money to the listener after `timeout`, with no key at all.\n//\n// The contract protects only the listener. CashCast decides where its own share goes\n// (artist and platform outputs), because it must sign every settlement.\n//\n// The listener's app must rebuild this contract's address from parameters it has checked\n// itself (timeout is a block height in a sane range, maxRefundFee is small, funding is well\n// above maxRefundFee + 546) and fund only the plain, non-token address.\ncontract CashCastChannel(\n    bytes20 userPkh,    // the listener's wallet address (P2PKH hash): unspent money always returns here\n    pubkey sessionPk,   // the listener's throwaway browser key; it signs running totals and nothing else\n    pubkey providerPk,  // CashCast's settlement key\n    int timeout,        // block height after which anyone may refund the listener\n    int maxRefundFee    // the most the keyless refund may spend on the network fee\n) {\n    // CashCast claims `amount`, the latest total the listener's session key signed.\n    // payMsg = \"CC01\" ‖ funding txid (32 bytes, internal byte order) ‖ vout (4 bytes LE) ‖ amount (8 bytes LE).\n    function settle(sig providerSig, datasig paySig, bytes payMsg) {\n        // One channel per transaction, so one refund output can never be counted for two channels.\n        require(tx.inputs.length == 1);\n        // Channels carry BCH only; a token sent here by mistake must not be taken.\n        require(tx.inputs[0].tokenCategory == 0x);\n        require(checkSig(providerSig, providerPk));\n        require(checkDataSig(paySig, payMsg, sessionPk));\n\n        // The fixed \"CC01\" tag means a signature over any other kind of message can never pass\n        // as a payment. The signed total names this exact channel (txid AND vout), so it cannot\n        // be replayed against another channel opened with the same keys.\n        require(payMsg.length == 48);\n        bytes tag, bytes rest = payMsg.split(4);\n        require(tag == 0x43433031);\n        bytes txid, bytes rest2 = rest.split(32);\n        require(txid == tx.inputs[0].outpointTransactionHash);\n        bytes vout, bytes amountBytes = rest2.split(4);\n        require(int(vout) == tx.inputs[0].outpointIndex);\n\n        // A total with the top bit set decodes as negative and fails here.\n        int amount = int(amountBytes);\n        int value = tx.inputs[0].value;\n        require(amount > 0);\n        require(amount <= value);\n\n        // Everything the listener did not spend goes back to them in output 0. Only when that\n        // remainder is below the network dust limit (546 sats) may it be left out, because such\n        // an output could not be relayed.\n        int remainder = value - amount;\n        if (remainder >= 546) {\n            require(tx.outputs[0].lockingBytecode == new LockingBytecodeP2PKH(userPkh));\n            require(tx.outputs[0].value >= remainder);\n        }\n    }\n\n    // After `timeout`, anyone can send the whole balance (minus at most maxRefundFee) back to the\n    // listener. No signature is needed: the only output is forced to the listener's address, so\n    // whoever broadcasts it can pay the network fee but cannot keep anything.\n    function refund() {\n        require(tx.inputs.length == 1);\n        require(tx.inputs[0].tokenCategory == 0x);\n        require(tx.time >= timeout);\n        require(tx.outputs.length == 1);\n        require(tx.outputs[0].lockingBytecode == new LockingBytecodeP2PKH(userPkh));\n        require(tx.outputs[0].value >= tx.inputs[0].value - maxRefundFee);\n        require(tx.outputs[0].value >= 546);\n    }\n}\n",
+  "fingerprint": "b02ae3a6cfee16a2b9009606226fdec6cb70b4c26d795dacfe5a77c3bfd5947e",
+  "debug": {
+    "bytecode": "5579009c63c3519d00ce0088567a537aad557a5679537abb5479827701309d547a547f7c04434330318801207f7c00c888547f7c8100c99d8100c67800a0696ea1697c9476022202a26300cd0376a91453797e0288ac7e8800cc78a269686d6d755167557a519dc3519d00ce0088537ab175c4519d00cd0376a9147b7e0288ac7e8800cc00c6547a94a26900cc022202a2777768",
+    "sourceMap": "23:4:56:5;;;;;25:16:25:32;:36::37;:8::39:1;27:26:27:27:0;:16::42:1;:46::48:0;:8::50:1;28:25:28:36:0;;:38::48;;:8::51:1;29:29:29:35:0;;:37::43;;:45::54;;:8::57:1;34:16:34:22:0;;:::29:1;;:33::35:0;:8::37:1;35:32:35:38:0;;:45::46;:32::47:1;36:16:36:19:0;:23::33;:8::35:1;37:45:37:47:0;:34::48:1;38:16:38:20:0;:34::35;:24::60:1;:8::62;39:52:39:53:0;:40::54:1;40:20:40:24:0;:16::25:1;:39::40:0;:29::55:1;:8::57;43:21:43:37;44:30:44:31:0;:20::38:1;45:16:45:22:0;:25::26;:16:::1;:8::28;46:16:46:31:0;::::1;:8::33;51:32:51:38:0;:24:::1;52:12:52:21:0;:25::28;:12:::1;:30:55:9:0;53:31:53:32;:20::49:1;:53::86:0;:78::85;;:53::86:1;;;:12::88;54:31:54:32:0;:20::39:1;:43::52:0;:20:::1;:12::54;52:30:55:9;23:67:56:5;;;;:4;61::69::0;;;;62:16:62:32;:36::37;:8::39:1;63:26:63:27:0;:16::42:1;:46::48:0;:8::50:1;64:27:64:34:0;;:8::36:1;;65:16:65:33:0;:37::38;:8::40:1;66:27:66:28:0;:16::45:1;:49::82:0;:74::81;:49::82:1;;;:8::84;67:27:67:28:0;:16::35:1;:49::50:0;:39::57:1;:60::72:0;;:39:::1;:16;:8::74;68:27:68:28:0;:16::35:1;:39::42:0;:8::44:1;61:22:69:5;;14:0:70:1",
+    "logs": [],
+    "requires": [
+      { "ip": 12, "line": 25 },
+      { "ip": 16, "line": 27 },
+      { "ip": 21, "line": 28 },
+      { "ip": 28, "line": 29 },
+      { "ip": 34, "line": 34 },
+      { "ip": 41, "line": 36 },
+      { "ip": 47, "line": 38 },
+      { "ip": 54, "line": 40 },
+      { "ip": 61, "line": 45 },
+      { "ip": 64, "line": 46 },
+      { "ip": 79, "line": 53 },
+      { "ip": 84, "line": 54 },
+      { "ip": 97, "line": 62 },
+      { "ip": 101, "line": 63 },
+      { "ip": 104, "line": 64 },
+      { "ip": 108, "line": 65 },
+      { "ip": 116, "line": 66 },
+      { "ip": 125, "line": 67 },
+      { "ip": 130, "line": 68 }
+    ],
+    "sourceTags": "125:126:sc"
+  },
+  "compiler": {
+    "name": "cashc",
+    "version": "0.14.0",
+    "options": {
+      "enforceFunctionParameterTypes": true,
+      "enforceLocktimeGuard": true
+    }
+  },
+  "updatedAt": "2026-11-14T19:06:56.781Z"
+}

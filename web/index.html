@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CashCast</title>
+  <style>
+    :root { --bg: #f6f3ec; --fg: #1c1b18; --mut: #6f6b62; --line: #ddd7ca; --accent: #0a8f5a; --card: #fffdf8; }
+    @media (prefers-color-scheme: dark) { :root { --bg: #15140f; --fg: #eeeae0; --mut: #9a958a; --line: #34312a; --accent: #3ccf8e; --card: #1d1c16; } }
+    * { box-sizing: border-box; }
+    body { margin: 0 auto; max-width: 720px; padding: 24px 16px 64px; background: var(--bg); color: var(--fg); font: 16px/1.5 system-ui, sans-serif; }
+    h1 { font-size: 28px; margin: 0; letter-spacing: -0.5px; }
+    .tag { color: var(--mut); margin: 4px 0 24px; }
+    audio { width: 100%; margin: 12px 0; }
+    #now { font-weight: 600; }
+    ul { list-style: none; padding: 0; margin: 16px 0; border-top: 1px solid var(--line); }
+    .track { display: grid; grid-template-columns: 1fr auto; gap: 0 12px; width: 100%; text-align: left; padding: 10px 4px;
+      background: none; border: 0; border-bottom: 1px solid var(--line); color: inherit; font: inherit; cursor: pointer; }
+    .track .a { color: var(--mut); font-size: 14px; grid-column: 1; } .track .d { grid-row: 1 / 3; grid-column: 2; align-self: center; color: var(--mut); }
+    .track.on .t { color: var(--accent); }
+    .card, #meter { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 16px; margin: 16px 0; }
+    .row { display: flex; justify-content: space-between; } .mut { color: var(--mut); font-size: 14px; }
+    input, select, button.main { font: inherit; padding: 10px 12px; border-radius: 8px; border: 1px solid var(--line); background: var(--bg); color: inherit; width: 100%; margin-top: 8px; }
+    button.main { background: var(--accent); color: #fff; border: 0; font-weight: 600; cursor: pointer; }
+    code { word-break: break-all; font-size: 13px; }
+    #error { color: #c0392b; } a { color: var(--accent); }
+  </style>
+</head>
+<body>
+  <h1>CashCast</h1>
+  <p class="tag">Pay per second for music, in Bitcoin Cash. Approve once; whatever you don't use comes back automatically.</p>
+
+  <div id="now">Loading…</div>
+  <audio id="audio" controls></audio>
+  <div class="mut"><span id="rate"></span> · <a id="license" target="_blank" rel="noopener">licence</a></div>
+
+  <section id="meter" hidden>
+    <div class="row"><span>Approved</span><b id="approved"></b></div>
+    <div class="row"><span>Listened</span><b id="spent"></b></div>
+    <div class="row"><span>Unspent (returns to you)</span><b id="unspent"></b></div>
+    <p class="mut"><a id="fundtx" target="_blank" rel="noopener">funding transaction</a></p>
+    <button class="main" id="stop">Stop and settle</button>
+  </section>
+
+  <section class="card" data-card="continue" hidden>
+    <b>Keep listening?</b>
+    <p class="mut">Approve a small budget once. You pay only for the seconds you play; the rest returns to your wallet.</p>
+    <input id="listener" placeholder="Your Bitcoin Cash address (refunds go here)">
+    <select id="budget"><option value="20000">20,000 sats</option><option value="50000" selected>50,000 sats</option><option value="100000">100,000 sats</option></select>
+    <button class="main" id="approve">Approve budget</button>
+  </section>
+  <section class="card" data-card="funding" hidden>
+    <b>Waiting for your payment…</b>
+    <p class="mut">Channel contract: <code id="contract"></code></p>
+  </section>
+  <section class="card" data-card="budget" hidden>
+    <b>Budget used up.</b> <p class="mut">Stop and settle, then start a new session to keep listening.</p>
+  </section>
+  <section class="card" data-card="settled" hidden>
+    <b>Settled.</b> <p><span id="returned"></span> returned to you. <a id="settletx" target="_blank" rel="noopener">settlement transaction</a></p>
+    <button class="main" id="new">Start a new session</button>
+  </section>
+  <p id="error"></p>
+
+  <ul id="tracks"></ul>
+  <p class="mut">Demo catalogue: CC0 tracks. In production, artists register their own Bitcoin Cash address.</p>
+  <script type="module" src="/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,27 @@
+{
+  "name": "cashcast",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Pay-per-second audio streaming on Bitcoin Cash: listeners buy decryption keys through a covenant channel.",
+  "license": "MIT",
+  "scripts": {
+    "build:contract": "cashc contracts/CashCastChannel.cash -o contracts/CashCastChannel.json",
+    "test": "npm run build:contract && node --test test/*.test.js",
+    "build:web": "esbuild web/src/app.js --bundle --format=esm --target=es2022 --minify --outfile=web/app.js",
+    "dev": "npm run build:contract && npm run build:web && node src/main.js"
+  },
+  "dependencies": {
+    "@bitauth/libauth": "^3.0.0",
+    "@fastify/rate-limit": "^11.2.2",
+    "@fastify/static": "^10.1.11",
+    "better-sqlite3": "^13.2.0",
+    "cashc": "^0.14.0",
+    "cashscript": "^0.14.0",
+    "fastify": "^5.12.8",
+    "hls.js": "^1.7.4"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.2"
+  }
+}

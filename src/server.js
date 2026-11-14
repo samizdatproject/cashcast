@@ -1,0 +1,202 @@
+// CashCast key server. Sells 16-byte segment keys against payments the listener's session key
+// signs off-chain, and settles each channel on-chain once.
+import Fastify from 'fastify';
+import fastifyStatic from '@fastify/static';
+import rateLimit from '@fastify/rate-limit';
+import { randomBytes, randomUUID, createHash, timingSafeEqual } from 'node:crypto';
+import { readdirSync, readFileSync, existsSync } from 'node:fs';
+import { join } from 'node:path';
+import { secp256k1, binToHex, hexToBin } from '@bitauth/libauth';
+import { segmentKey } from './keys.js';
+import { listenerPkh, channelContract, verifyPayment, buildSettle, lockOf } from './channel.js';
+
+const sha256hex = (s) => createHash('sha256').update(s).digest('hex');
+
+export function loadCatalog(mediaDir) {
+  if (!existsSync(mediaDir)) return [];
+  return readdirSync(mediaDir).filter((d) => existsSync(join(mediaDir, d, 'manifest.json')))
+    .map((d) => JSON.parse(readFileSync(join(mediaDir, d, 'manifest.json'), 'utf8')));
+}
+
+export function buildServer(cfg) {
+  const {
+    provider, db, masterSecret, providerKey, mediaDir, payouts,
+    priceSatsPerSegment = 150, freeSegments = 15, sessionBlocks = 144, safetyBlocks = 12,
+    maxRefundFee = 1000, minFunding = 5000, maxSpend = 200_000, idleMs = 10 * 60_000, fundingCheckMs = 5_000,
+    heightTtlMs = 30_000, dev = false, logger = false, rateLimitMax = 600,
+  } = cfg;
+  // Fail at startup, not at the first settlement: payouts must parse and add up to 100%.
+  if (!payouts?.length || payouts.reduce((a, p) => a + p.bps, 0) !== 10_000) throw new Error('payout bps must sum to 10000');
+  for (const p of payouts) lockOf(p.address);
+  if (!Buffer.isBuffer(masterSecret) || masterSecret.length !== 32) throw new Error('master secret must be 32 bytes');
+  const providerPk = binToHex(secp256k1.derivePublicKeyCompressed(providerKey));
+  const catalog = loadCatalog(mediaDir);
+  const tracks = new Map(catalog.map((m) => [m.trackId, m]));
+  const app = Fastify({ logger });
+  app.register(rateLimit, { max: rateLimitMax, timeWindow: '1 minute' });
+
+  let heightCache = { at: 0, value: 0 };
+  async function height() {
+    if (Date.now() - heightCache.at >= heightTtlMs) heightCache = { at: Date.now(), value: await provider.getBlockHeight() };
+    return heightCache.value;
+  }
+
+  const q = {
+    insert: db.prepare(`INSERT INTO sessions (id, token_hash, listener_address, user_pkh, session_pk, timeout,
+      max_refund_fee, address, created_at, last_activity) VALUES (?,?,?,?,?,?,?,?,?,?)`),
+    get: db.prepare('SELECT * FROM sessions WHERE id = ?'),
+    fund: db.prepare(`UPDATE sessions SET funding_txid=?, funding_vout=?, funding_sats=?, status='funded' WHERE id=? AND status='open'`),
+    pay: db.prepare('UPDATE sessions SET paid_amount=?, paid_sig=?, last_activity=? WHERE id=? AND paid_amount < ?'),
+    touch: db.prepare('UPDATE sessions SET last_activity=? WHERE id=?'),
+    settled: db.prepare(`UPDATE sessions SET settle_txid=?, status='settled' WHERE id=?`),
+    claimSettle: db.prepare(`UPDATE sessions SET status='settling' WHERE id=? AND status='funded'`),
+    setStatus: db.prepare('UPDATE sessions SET status=? WHERE id=?'),
+    due: db.prepare(`SELECT id FROM sessions WHERE status='funded' AND paid_amount > 0 AND (last_activity <= ? OR timeout - ? <= ?)`),
+    isUnlocked: db.prepare('SELECT 1 FROM unlocked WHERE session_id=? AND track=? AND segment=?'),
+    used: db.prepare('SELECT COUNT(*) AS n FROM unlocked WHERE session_id=?'),
+    unlock: db.prepare('INSERT OR IGNORE INTO unlocked (session_id, track, segment) VALUES (?,?,?)'),
+  };
+  const params = (s) => ({ userPkh: s.user_pkh, sessionPk: s.session_pk, providerPk, timeout: s.timeout, maxRefundFee: s.max_refund_fee });
+  const credits = (s) => Math.floor(s.paid_amount / priceSatsPerSegment);
+
+  // Bearer token check. The channel id is public; only the token (given once, at creation) is a credential.
+  function tokenOk(s, headers) {
+    const token = String(headers.authorization || '').replace(/^Bearer /, '');
+    return Boolean(s && token && timingSafeEqual(Buffer.from(sha256hex(token)), Buffer.from(s.token_hash)));
+  }
+  function auth(req, reply) {
+    const s = q.get.get(req.params.id);
+    if (!tokenOk(s, req.headers)) { reply.code(401).send({ error: 'unknown session or bad token' }); return null; }
+    return s;
+  }
+
+  // Look for the funding coin once the listener's wallet has paid the contract address.
+  // Funding is accepted unconfirmed (BCH 0-conf), which is why each session can spend at most
+  // `maxSpend` sats: that bounds what a double-spent funding could cost. Lookups are throttled.
+  const lastFundingCheck = new Map();
+  async function refreshFunding(s) {
+    if (s.status !== 'open') return s;
+    if (Date.now() - (lastFundingCheck.get(s.id) || 0) < fundingCheckMs) return s;
+    lastFundingCheck.set(s.id, Date.now());
+    const utxos = await provider.getUtxos(s.address);
+    const coin = utxos.find((u) => !u.token && u.satoshis >= BigInt(minFunding));
+    if (coin) { q.fund.run(coin.txid, coin.vout, Number(coin.satoshis), s.id); lastFundingCheck.delete(s.id); }
+    return q.get.get(s.id);
+  }
+
+  const view = (s) => ({
+    id: s.id, status: s.status, address: s.address, params: params(s),
+    funding: s.funding_txid ? { txid: s.funding_txid, vout: s.funding_vout, satoshis: s.funding_sats } : null,
+    paidAmount: s.paid_amount, credits: credits(s), used: q.used.get(s.id).n, settleTxid: s.settle_txid,
+  });
+
+  app.get('/api/config', async () => ({ providerPk, priceSatsPerSegment, freeSegments, sessionBlocks, maxRefundFee, minFunding, maxSpend, dev }));
+  app.get('/api/catalog', async () => catalog);
+
+  app.post('/api/sessions', { config: { rateLimit: { max: 10, timeWindow: '1 minute' } } }, async (req, reply) => {
+    const { listenerAddress, sessionPk } = req.body || {};
+    let userPkh;
+    try { userPkh = binToHex(listenerPkh(String(listenerAddress))); } catch (e) { return reply.code(400).send({ error: e.message }); }
+    if (!/^0[23][0-9a-f]{64}$/.test(String(sessionPk))) return reply.code(400).send({ error: 'sessionPk must be a compressed public key (hex)' });
+    const timeout = (await height()) + sessionBlocks;
+    const id = randomUUID(), token = randomBytes(32).toString('hex'), now = Date.now();
+    const p = { userPkh, sessionPk, providerPk, timeout, maxRefundFee };
+    const address = channelContract(p, provider).address;
+    q.insert.run(id, sha256hex(token), listenerAddress, userPkh, sessionPk, timeout, maxRefundFee, address, now, now);
+    return reply.code(201).send({ ...view(q.get.get(id)), token });
+  });
+
+  app.get('/api/sessions/:id', async (req, reply) => {
+    const s = auth(req, reply); if (!s) return reply;
+    return view(await refreshFunding(s));
+  });
+
+  // The listener's browser sends its new running total, signed with the session key.
+  app.post('/api/sessions/:id/pay', async (req, reply) => {
+    let s = auth(req, reply); if (!s) return reply;
+    s = await refreshFunding(s);
+    if (s.status !== 'funded') return reply.code(409).send({ error: `session is ${s.status}` });
+    const amount = Number(req.body?.amount), sig = String(req.body?.sig || '');
+    if (!Number.isSafeInteger(amount) || amount <= s.paid_amount) return reply.code(400).send({ error: 'total must increase' });
+    if (amount > Math.min(s.funding_sats, maxSpend)) return reply.code(400).send({ error: 'total exceeds the channel balance or the per-session limit' });
+    if (!/^[0-9a-f]{128}$/.test(sig) || !verifyPayment(s.session_pk, s.funding_txid, s.funding_vout, amount, sig)) {
+      return reply.code(400).send({ error: 'bad signature' });
+    }
+    q.pay.run(amount, sig, Date.now(), s.id, amount);
+    return view(q.get.get(s.id));
+  });
+
+  // Segment keys. The first `freeSegments` of every track are free; after that each new key uses one credit.
+  app.get('/k/:track/:n', async (req, reply) => {
+    const track = tracks.get(req.params.track), n = Number(req.params.n);
+    if (!track || !Number.isInteger(n) || n < 0 || n >= track.keyHashes.length) return reply.code(404).send({ error: 'no such segment' });
+    const send = () => reply.header('cache-control', 'no-store').type('application/octet-stream').send(segmentKey(masterSecret, track.trackId, n));
+    if (n < freeSegments) return send();
+    const id = String(req.headers['x-cashcast-session'] || '');
+    const s = q.get.get(id);
+    if (!tokenOk(s, req.headers)) return reply.code(402).send({ error: 'payment required' });
+    if (s.status !== 'funded') return reply.code(402).send({ error: `session is ${s.status}` });
+    // Stop selling well before the timeout, so the settlement is mined before anyone can refund.
+    if ((await height()) >= s.timeout - safetyBlocks) return reply.code(410).send({ error: 'session expired; start a new one' });
+    if (!q.isUnlocked.get(s.id, track.trackId, n)) {
+      const bought = db.transaction(() => {
+        const now = q.get.get(s.id);
+        if (now.status !== 'funded') return false;
+        if (q.isUnlocked.get(s.id, track.trackId, n)) return true; // a parallel request just bought it
+        if (q.used.get(s.id).n >= credits(now)) return false;
+        q.unlock.run(s.id, track.trackId, n);
+        return true;
+      })();
+      if (!bought) return reply.code(402).send({ error: 'payment required', credits: credits(s), used: q.used.get(s.id).n });
+    }
+    q.touch.run(Date.now(), s.id);
+    return send();
+  });
+
+  // Settle a session on-chain (the listener pressed stop, or the sweeper found it idle or near its timeout).
+  // The session is first moved to 'settling', which freezes it: /pay and /k only serve 'funded'
+  // sessions, so nothing can be bought after the settled total is read.
+  async function settleSession(id) {
+    const pre = q.get.get(id);
+    if (!pre || pre.paid_amount <= 0 || q.claimSettle.run(id).changes !== 1) return null;
+    const s = q.get.get(id);
+    try {
+      // At or past the timeout the keyless refund can win the race; don't broadcast a losing settle.
+      if ((await provider.getBlockHeight()) >= s.timeout) { q.setStatus.run('expired', id); return null; }
+      const contract = channelContract(params(s), provider);
+      // Use the live coin from the chain: it also proves the channel is still unspent.
+      const utxo = (await provider.getUtxos(s.address)).find((u) => u.txid === s.funding_txid && u.vout === s.funding_vout);
+      if (!utxo) { q.setStatus.run('closed', id); return null; }
+      const tx = buildSettle({ contract, provider, utxo, amount: s.paid_amount, sigHex: s.paid_sig,
+        providerKey, userPkh: s.user_pkh, payouts });
+      if (!tx) { q.setStatus.run('closed', id); return null; }
+      const { txid } = await tx.send();
+      q.settled.run(txid, id);
+      return txid;
+    } catch (e) {
+      q.setStatus.run('funded', id); // try again on the next sweep
+      throw e;
+    }
+  }
+
+  // Settle sessions nobody closed: idle ones, and any that are getting near their timeout.
+  async function sweep() {
+    const h = await provider.getBlockHeight();
+    const done = [];
+    for (const { id } of q.due.all(Date.now() - idleMs, safetyBlocks, h)) {
+      try { const txid = await settleSession(id); if (txid) done.push(txid); } catch (e) { app.log.error({ id, err: e.message }, 'settle failed'); }
+    }
+    return done;
+  }
+
+  app.post('/api/sessions/:id/settle', async (req, reply) => {
+    const s = auth(req, reply); if (!s) return reply;
+    const txid = await settleSession(s.id);
+    return { ...view(q.get.get(s.id)), settleTxid: txid };
+  });
+
+  if (mediaDir && existsSync(mediaDir)) app.register(fastifyStatic, { root: mediaDir, prefix: '/media/' });
+  app.decorate('settleSession', settleSession);
+  app.decorate('sweep', sweep);
+  return app;
+}

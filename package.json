@@ -17,7 +17,7 @@
     "@fastify/static": "^10.1.11",
     "@wizardconnect/core": "^0.2.10",
     "@wizardconnect/dapp": "^0.2.7",
-    "better-sqlite3": "^13.2.0",
+    "better-sqlite3": "^12.11.1",
     "cashc": "^0.14.0",
     "cashscript": "^0.14.0",
     "fastify": "^5.12.8",
@@ -26,5 +26,8 @@
   },
   "devDependencies": {
     "esbuild": "^0.28.2"
+  },
+  "engines": {
+    "node": ">=20"
   }
 }

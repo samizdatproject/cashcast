@@ -8,3 +8,4 @@ audio-src/
 *.db-shm
 *.db-wal
 *.db-journal
+deploy/cashcast.env

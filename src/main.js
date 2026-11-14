@@ -46,6 +46,7 @@ if (payouts.some((p) => !p.address)) {
 const app = buildServer({
   provider, db: openDb(network === 'mock' ? ':memory:' : join(root, `cashcast-${network}.db`)), masterSecret, providerKey,
   mediaDir: join(root, 'media', network), payouts, logger: { level: 'info' }, dev: network === 'mock',
+  trustProxy: process.env.CASHCAST_TRUST_PROXY === '1',
   // 1 cent per minute at the live BCH price (mock mode: a fixed $200 so it works offline).
   centsPerMinute: Number(process.env.CASHCAST_CENTS_PER_MINUTE || 1),
   usdPrice: network === 'mock' ? async () => 200 : livePrice(),

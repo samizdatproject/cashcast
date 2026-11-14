@@ -24,7 +24,7 @@ export function buildServer(cfg) {
     provider, db, masterSecret, providerKey, mediaDir, payouts,
     priceSatsPerSegment = 150, centsPerMinute = null, usdPrice = null, freeSegments = 15, sessionBlocks = 144, safetyBlocks = 12,
     maxRefundFee = 1000, minFunding = 5000, maxSpend = 500_000, idleMs = 10 * 60_000, fundingCheckMs = 5_000,
-    heightTtlMs = 30_000, dev = false, logger = false, rateLimitMax = 600,
+    heightTtlMs = 30_000, dev = false, logger = false, rateLimitMax = 600, trustProxy = false,
   } = cfg;
   // Fail at startup, not at the first settlement: payouts must parse and add up to 100%.
   if (!payouts?.length || payouts.reduce((a, p) => a + p.bps, 0) !== 10_000) throw new Error('payout bps must sum to 10000');
@@ -33,7 +33,7 @@ export function buildServer(cfg) {
   const providerPk = binToHex(secp256k1.derivePublicKeyCompressed(providerKey));
   const catalog = loadCatalog(mediaDir);
   const tracks = new Map(catalog.map((m) => [m.trackId, m]));
-  const app = Fastify({ logger });
+  const app = Fastify({ logger, trustProxy }); // trustProxy only behind a local reverse proxy (real client IPs for rate limits)
   app.register(rateLimit, { max: rateLimitMax, timeWindow: '1 minute' });
 
   let heightCache = { at: 0, value: 0 };

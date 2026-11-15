@@ -12,6 +12,7 @@ const AHEAD = 5;                  // keys paid for ahead of the playing segment 
 const STORE = 'cashcast-session';
 const CLOSE_FEE_SATS = 700;       // when stopping before any paid key: covers the settlement fee so the rest returns now
 const EXPLORER = 'https://blockchair.com/bitcoin-cash/transaction/';
+const HISTORY = 'cashcast-history';
 const BLOCK_MINUTES = 10;
 
 const state = {
@@ -155,11 +156,112 @@ async function settle() {
     const paid = Math.min(s.paidAmount, state.trust?.signed ?? s.paidAmount);
     $('#paidtotal').textContent = money(paid);
     $('#returned').textContent = money((state.trust?.budget ?? s.funding.satoshis) - paid);
-    $('#settletx').href = EXPLORER + s.settleTxid;
     step('settled');
+    await showReceipt('settle', s.settleTxid);
   } else {
     showWaiting(s);
   }
+}
+
+// ---------- receipt ----------
+// After a settlement or refund the browser fetches the transaction, checks it is the one that
+// spent this channel, and shows every output: what came back to the listener, the artist's and
+// CashCast's shares, and the network fee. Kept in this browser's history.
+const shortId = (txid) => `${txid.slice(0, 8)}…${txid.slice(-6)}`;
+const sats = (n) => `${Number(n).toLocaleString()} sats`;
+
+async function fetchTx(txid) {
+  for (let i = 0; i < 6; i++) {
+    try { return (await api(`/api/tx/${txid}`)).hex; } catch (e) { if (e.status !== 404 || i === 5) throw e; }
+    await new Promise((r) => setTimeout(r, 1500));
+  }
+}
+
+async function readClose(kind, txid) {
+  const s = state.session, { decodeTransaction, hashTransaction, hexToBin, binToHex, cashAddressToLockingBytecode } = await lib();
+  const bin = hexToBin(await fetchTx(txid));
+  const tx = decodeTransaction(bin);
+  if (typeof tx === 'string' || hashTransaction(bin) !== txid) throw new Error('the transaction did not check out');
+  const input = tx.inputs[0];
+  if (tx.inputs.length !== 1 || binToHex(input.outpointTransactionHash) !== s.funding.txid || input.outpointIndex !== s.funding.vout) {
+    throw new Error('the transaction does not spend this channel');
+  }
+  const own = `76a914${s.params.userPkh}88ac`;
+  const payouts = (state.config.payouts || []).map((p) => ({ ...p, lock: binToHex(cashAddressToLockingBytecode(p.address).bytecode) }));
+  const outs = tx.outputs.map((o) => ({ lock: binToHex(o.lockingBytecode), value: Number(o.valueSatoshis) }));
+  const others = outs.filter((o) => o.lock !== own);
+  // Settlement outputs come in payout order. When a part would be below the 546-sat minimum, the
+  // whole share goes to the largest payout (the artist) in a single output.
+  const main = payouts.reduce((a, p) => (p.bps > a.bps ? p : a), payouts[0]);
+  const whole = others.length === 1 && payouts.length > 1;
+  const expected = whole ? [main] : payouts;
+  const rows = outs.map((o) => {
+    if (o.lock === own) return { label: 'Back to you', value: o.value, you: true };
+    const p = expected[others.indexOf(o)];
+    const label = !p || p.lock !== o.lock ? 'Other' : whole ? `${p.label || 'Payout'} (whole share)` : `${p.label || 'Payout'} (${p.bps / 100}%)`;
+    return { label, value: o.value };
+  });
+  const input0 = s.funding.satoshis;
+  rows.push({ label: 'Network fee', value: input0 - outs.reduce((a, o) => a + o.value, 0) });
+  return { kind, txid, rows, back: rows.filter((r) => r.you).reduce((a, r) => a + r.value, 0) };
+}
+
+function receiptEl(entry) {
+  const box = document.createElement('div'); box.className = 'receipt';
+  const txRow = (title, amount, txid, note, rows) => {
+    const d = document.createElement('div'); d.className = 'tx';
+    const head = document.createElement('div'); head.className = 'head';
+    const b = document.createElement('b'); b.textContent = title;
+    const a = document.createElement('a'); a.href = EXPLORER + txid; a.target = '_blank'; a.rel = 'noopener'; a.textContent = `${shortId(txid)} ↗`;
+    const amt = document.createElement('span'); amt.className = 'amt'; amt.textContent = amount;
+    head.append(b, a, amt); d.append(head);
+    if (note) { const n = document.createElement('div'); n.className = 'note'; n.textContent = note; d.append(n); }
+    if (rows) {
+      const ul = document.createElement('ul');
+      for (const r of rows) {
+        const li = document.createElement('li'); if (r.you) li.className = 'you';
+        const l = document.createElement('span'); l.textContent = r.label;
+        const v = document.createElement('span'); v.textContent = sats(r.value);
+        li.append(l, v); ul.append(li);
+      }
+      d.append(ul);
+    }
+    return d;
+  };
+  box.append(txRow('Funding', `−${sats(entry.budget)}`, entry.fundTxid, 'From your wallet into your channel'));
+  if (entry.close) {
+    const title = entry.close.kind === 'refund' ? 'Refund' : 'Settlement';
+    box.append(txRow(title, `+${sats(entry.close.back)}`, entry.close.txid, `Paid for listening: ${sats(entry.budget - entry.close.back)}`, entry.close.rows));
+  } else if (entry.closeTxid) {
+    box.append(txRow('Settlement', '', entry.closeTxid, 'Details not available yet — open the link to see it on the blockchain.'));
+  }
+  return box;
+}
+
+function loadHistory() { try { return JSON.parse(localStorage.getItem(HISTORY) || '[]'); } catch { return []; } }
+function renderHistory() {
+  const list = loadHistory(), ul = $('#historylist');
+  $('#history').hidden = list.length === 0;
+  ul.innerHTML = '';
+  for (const e of list) {
+    const li = document.createElement('li');
+    const when = document.createElement('div'); when.className = 'when';
+    when.textContent = new Date(e.at).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' });
+    li.append(when, receiptEl(e)); ul.append(li);
+  }
+}
+
+async function showReceipt(kind, txid) {
+  const s = state.session;
+  const entry = { at: Date.now(), sessionId: s.id, fundTxid: s.funding.txid, budget: s.funding.satoshis, closeTxid: txid };
+  $('#receipt').replaceChildren(receiptEl(entry));
+  try { entry.close = await readClose(kind, txid); } catch (e) { console.warn('receipt:', e.message); }
+  $('#receipt').replaceChildren(receiptEl(entry));
+  try {
+    const list = loadHistory().filter((x) => x.sessionId !== s.id);
+    localStorage.setItem(HISTORY, JSON.stringify([entry, ...list].slice(0, 50)));
+  } catch { /* storage unavailable */ }
+  renderHistory();
 }
 
 function showWaiting(s) {
@@ -453,6 +555,7 @@ async function init() {
   $('#listener').hidden = !c.dev;
   $('#autosettle').textContent = c.autoSettle ? 'settles on its own after 10 idle minutes' : 'press Stop & settle when you are done';
   if (state.catalog[0]) play(state.catalog[0], false);
+  renderHistory();
   await resume();
 
   const a = $('#audio');
@@ -479,9 +582,10 @@ async function init() {
   $('#refundnow').onclick = async () => {
     try {
       const r = await api(`/api/sessions/${state.session.id}/refund`, { method: 'POST' });
-      state.session = null; save();
       $('#paidtotal').textContent = money(0); $('#returned').textContent = 'everything';
-      $('#settletx').href = EXPLORER + r.refundTxid; step('settled');
+      step('settled');
+      merge(r); await showReceipt('refund', r.refundTxid);
+      state.session = null; save();
     } catch (e) { showError(e); }
   };
   $('#cancelpair').onclick = async (e) => { e.preventDefault(); (await walletLib()).cancelPairing(); step('free'); };

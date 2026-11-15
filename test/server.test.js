@@ -126,6 +126,12 @@ test('settlement: listener gets the remainder, artist 90% and platform 10% of th
   const fee = 10_000n - artist - platform;
   assert.ok(fee > 0n && fee < 1_000n, `fee ${fee}`);
   assert.ok(artist > platform * 8n && artist < platform * 10n, `artist ${artist}, platform ${platform}`);
+  // The page can fetch the settlement to show the receipt; unrelated or malformed txids are refused.
+  const tx = await w.app.inject({ method: 'GET', url: `/api/tx/${done.settleTxid}` });
+  assert.equal(tx.statusCode, 200);
+  assert.match(tx.json().hex, /^0[12]000000/);
+  assert.equal((await w.app.inject({ method: 'GET', url: `/api/tx/${'ab'.repeat(32)}` })).statusCode, 404);
+  assert.equal((await w.app.inject({ method: 'GET', url: '/api/tx/nothex' })).statusCode, 400);
   // A second settle does nothing.
   const again = await w.app.inject({ method: 'POST', url: `/api/sessions/${s.id}/settle`, headers: authed(s) });
   assert.equal(again.json().settleTxid, null);
@@ -249,4 +255,17 @@ test('wallet coin lookup: all addresses at once, tagged with their address, toke
   assert.deepEqual(res.json().map((u) => [u.address, u.satoshis]), [[a, 10_000], [c, 7_000]]);
   const bad = await w.app.inject({ method: 'POST', url: '/api/utxos', payload: { addresses: [a, 'nonsense'] } });
   assert.equal(bad.statusCode, 400);
+});
+
+test('a small total whose 10% part would be dust goes wholly to the artist, not the platform', async () => {
+  const w = world();
+  let s = await openSession(w);
+  s = { ...(await fund(w, s)), token: s.token };
+  await pay(w, s, 2_000); // share after the fee ≈ 1,350: the platform's 10% would be below 546 sats
+  const res = await w.app.inject({ method: 'POST', url: `/api/sessions/${s.id}/settle`, headers: authed(s) });
+  assert.equal(res.json().status, 'settled', res.body);
+  const sats = async (a) => (await w.provider.getUtxosForLockingBytecode(cashAddressToLockingBytecode(a).bytecode)).reduce((t, u) => t + u.satoshis, 0n);
+  assert.equal(await sats(w.payouts[1].address), 0n);
+  const artist = await sats(w.payouts[0].address);
+  assert.ok(artist > 1_000n && artist < 2_000n, `artist ${artist}`);
 });

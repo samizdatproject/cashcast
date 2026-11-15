@@ -88,7 +88,7 @@
 
       <div class="step" data-step="settled" hidden>
         <p><b>Done.</b> You paid <b id="paidtotal"></b>; <b id="returned"></b> went back to your wallet.</p>
-        <p class="fine"><a id="settletx" target="_blank" rel="noopener">settlement transaction</a></p>
+        <div class="receipt" id="receipt"></div>
         <button class="main" id="again">Listen more</button>
       </div>
 
@@ -99,6 +99,12 @@
       </div>
 
       <p id="error" class="error" role="alert"></p>
+    </section>
+
+    <section class="history" id="history" hidden>
+      <h2>Your transactions</h2>
+      <ul id="historylist"></ul>
+      <p class="fine">Remembered in this browser only. Every line links to the public blockchain.</p>
     </section>
 
     <section class="catalog">

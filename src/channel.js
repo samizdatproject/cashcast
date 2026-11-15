@@ -76,9 +76,10 @@ export function buildSettle({ contract, provider, utxo, amount, sigHex, provider
   // Each payout gets its basis points; the last one also gets the rounding remainder.
   const split = payouts.slice(0, -1).map((p) => ({ to: lockOf(p.address), amount: total * BigInt(p.bps) / 10_000n }));
   split.push({ to: lockOf(payouts[payouts.length - 1].address), amount: total - split.reduce((a, o) => a + o.amount, 0n) });
-  // A part below dust cannot be relayed: give the whole share to the last payout instead.
+  // A part below dust cannot be relayed: the whole share then goes to the largest payout (the artist).
+  const main = payouts.reduce((a, p) => (p.bps > a.bps ? p : a));
   const finalPayouts = split.some((o) => o.amount < DUST)
-    ? [{ to: lockOf(payouts[payouts.length - 1].address), amount: share - fee }]
+    ? [{ to: lockOf(main.address), amount: share - fee }]
     : split;
   return make([...outputs, ...finalPayouts]);
 }

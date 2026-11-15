@@ -57,6 +57,22 @@ h2 { font: 600 22px/1.2 var(--display); margin: 0 0 12px; }
   font: 600 18px var(--display); cursor: pointer; }
 .chips button small { display: block; font: 400 11px var(--body); color: var(--mut); }
 .chips button.on { border-color: var(--green); box-shadow: inset 0 0 0 1px var(--green); }
+.receipt { margin: 14px 0 16px; border-top: 1px solid var(--line); }
+.receipt .tx { padding: 10px 0; border-bottom: 1px solid var(--line); }
+.receipt .head { display: flex; align-items: baseline; gap: 8px; font-size: 14px; }
+.receipt .head b { font-weight: 600; }
+.receipt .head .amt { margin-left: auto; font-variant-numeric: tabular-nums; font-weight: 600; }
+.receipt .head a { font-size: 12px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.receipt .note { font-size: 12px; color: var(--mut); margin-top: 2px; }
+.receipt ul { list-style: none; margin: 6px 0 0; padding: 0 0 0 14px; border-left: 2px solid var(--line); }
+.receipt li { display: flex; justify-content: space-between; font-size: 13px; color: var(--mut); font-variant-numeric: tabular-nums; padding: 1px 0; }
+.receipt li.you { color: var(--green); font-weight: 600; }
+.history { margin: 0 0 36px; }
+.history ul { list-style: none; margin: 0; padding: 0; }
+.history > ul > li { background: var(--card); border: 1px solid var(--line); border-radius: 16px; padding: 4px 16px 2px; margin-bottom: 10px; }
+.history .when { font-size: 12px; color: var(--mut); padding-top: 10px; }
+.history .receipt { margin: 0; border-top: 0; }
+.history .receipt .tx:last-child { border-bottom: 0; }
 .live { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--mut); margin: 0 0 12px; }
 .live .of { margin-left: auto; }
 .live .of b { color: var(--ink); font-weight: 600; }

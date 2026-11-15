@@ -38,8 +38,8 @@ if (network === 'mock') provider.setBlockHeight(950_000);
 if (network === 'mainnet') { provider.warmUp(); setInterval(() => provider.warmUp(), 5 * 60_000).unref(); }
 
 const payouts = [
-  { address: process.env.CASHCAST_ARTIST_ADDRESS, bps: 9000 },
-  { address: process.env.CASHCAST_PLATFORM_ADDRESS, bps: 1000 },
+  { address: process.env.CASHCAST_ARTIST_ADDRESS, bps: 9000, label: 'Artist' },
+  { address: process.env.CASHCAST_PLATFORM_ADDRESS, bps: 1000, label: 'CashCast' },
 ];
 if (payouts.some((p) => !p.address)) {
   if (network === 'mainnet') throw new Error('set CASHCAST_ARTIST_ADDRESS and CASHCAST_PLATFORM_ADDRESS');

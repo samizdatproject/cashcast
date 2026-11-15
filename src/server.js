@@ -61,6 +61,7 @@ export function buildServer(cfg) {
     settled: db.prepare(`UPDATE sessions SET settle_txid=?, status='settled' WHERE id=?`),
     claimSettle: db.prepare(`UPDATE sessions SET status='settling' WHERE id=? AND status='funded'`),
     setStatus: db.prepare('UPDATE sessions SET status=? WHERE id=?'),
+    knownTx: db.prepare('SELECT 1 FROM sessions WHERE funding_txid = ? OR settle_txid = ? LIMIT 1'),
     due: db.prepare(`SELECT id FROM sessions WHERE status='funded' AND paid_amount > 0 AND (last_activity <= ? OR timeout - ? <= ?)`),
     expired: db.prepare(`SELECT id FROM sessions WHERE status IN ('funded','expired','closed') AND timeout <= ?`),
     refunded: db.prepare(`UPDATE sessions SET settle_txid=?, status='refunded' WHERE id=?`),
@@ -118,7 +119,8 @@ export function buildServer(cfg) {
   app.get('/api/config', async () => {
     const price = await currentPrice();
     return { providerPk, priceSatsPerSegment: price.sats, usdPerBch: price.usd, centsPerMinute, freeSegments, sessionBlocks,
-      maxRefundFee, minFunding, maxSpend, dev, autoSettle };
+      maxRefundFee, minFunding, maxSpend, dev, autoSettle,
+      payouts: payouts.map(({ address, bps, label }) => ({ address, bps, label: label || null })) };
   });
   app.get('/api/catalog', async () => catalog);
 
@@ -195,6 +197,16 @@ export function buildServer(cfg) {
     const lists = await Promise.all(addresses.map((a) => provider.getUtxos(String(a))));
     return lists.flatMap((utxos, n) => utxos.filter((u) => !u.token)
       .map((u) => ({ address: addresses[n], txid: u.txid, vout: u.vout, satoshis: Number(u.satoshis) })));
+  });
+  // A CashCast transaction (a channel's funding, settlement or refund), so the page can show the
+  // listener exactly where the money went. It decodes and checks the transaction itself.
+  app.get('/api/tx/:txid', { config: { rateLimit: { max: 60, timeWindow: '1 minute' } } }, async (req, reply) => {
+    const txid = String(req.params.txid);
+    if (!/^[0-9a-f]{64}$/.test(txid)) return reply.code(400).send({ error: 'bad txid' });
+    if (!q.knownTx.get(txid, txid)) return reply.code(404).send({ error: 'not a CashCast transaction' });
+    const hex = await provider.getRawTransaction(txid);
+    if (!hex) return reply.code(404).send({ error: 'not found yet' });
+    return { hex };
   });
   app.post('/api/broadcast', { config: { rateLimit: { max: 10, timeWindow: '1 minute' } } }, async (req, reply) => {
     const hex = String(req.body?.hex || '');

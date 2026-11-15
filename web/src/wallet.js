@@ -55,10 +55,25 @@ export function rememberedWallet() {
   const st = loadSession(SESSION_KEY);
   return st?.walletPublicKey && st.paths?.length ? { walletName: st.walletName || 'your wallet' } : null;
 }
-export function forgetWallet() {
-  try { manager?.sendDisconnect('user switched wallet'); } catch { /* ignore */ }
+export async function forgetWallet(reason = 'user switched wallet') {
+  // Wait (briefly) until the goodbye message has actually gone out before closing the link.
+  try { await Promise.race([manager?.sendDisconnect(reason), new Promise((r) => setTimeout(r, 3000))]); } catch { /* ignore */ }
   relay?.cleanup(); manager?.removeAllListeners(); manager = relay = null;
   clearSession(SESSION_KEY);
+}
+
+// Tell the wallet to drop this connection (so it disappears from the wallet's list) and forget it
+// here. After a reload the link is closed, so open it briefly first; give up quietly after a few
+// seconds if the wallet is offline (it then simply shows the connection as idle).
+export async function disconnectWallet() {
+  if (!manager && rememberedWallet()) {
+    await new Promise((resolve) => {
+      const t = setTimeout(resolve, 6000);
+      try { reconnect((st) => { if (st === 'connected') { clearTimeout(t); setTimeout(resolve, 300); } }); }
+      catch { clearTimeout(t); resolve(); }
+    });
+  }
+  await forgetWallet('user disconnected');
 }
 
 function newManager(onStatus, existing) {

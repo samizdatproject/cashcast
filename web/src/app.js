@@ -80,6 +80,16 @@ function payMessage(txid, vout, amount) {
 function step(name) {
   for (const el of document.querySelectorAll('.step')) el.hidden = el.dataset.step !== name;
   state.step = name;
+  if (name === 'settled') showDisconnect();
+}
+// After a session, offer to drop the wallet connection (only if a real wallet is paired).
+async function showDisconnect() {
+  const line = $('#disconnectline');
+  line.hidden = true;
+  if (state.config?.dev) return;
+  $('#disconnect').hidden = false;
+  $('#disconnectmsg').textContent = "· removes CashCast from your wallet's connections";
+  line.hidden = !(state.wallet || (await walletLib()).rememberedWallet());
 }
 function showError(e) { $('#error').textContent = e ? (e.message || String(e)) : ''; }
 
@@ -586,6 +596,14 @@ async function init() {
   $('#connect').onclick = connectWallet;
   $('#approve').onclick = approve;
   $('#stop').onclick = $('#stop2').onclick = () => settle().catch(showError);
+  $('#disconnect').onclick = async (e) => {
+    e.preventDefault();
+    $('#disconnect').hidden = true;
+    $('#disconnectmsg').textContent = 'Disconnecting…';
+    await (await walletLib()).disconnectWallet();
+    state.wallet = null;
+    $('#disconnectmsg').textContent = 'Wallet disconnected. You can also delete any old CashCast entries in your wallet.';
+  };
   $('#again').onclick = () => { state.session = null; state.trust = null; state.bought.clear(); save(); if (state.wallet) { renderChips(); step('approve'); prepare(); } else step('free'); };
   $('#dismiss').onclick = () => { state.session = null; state.trust = null; save(); step('free'); };
   $('#refundnow').onclick = async () => {
@@ -599,7 +617,7 @@ async function init() {
   };
   $('#cancelpair').onclick = async (e) => { e.preventDefault(); (await walletLib()).cancelPairing(); step('free'); };
   $('#cancelsign').onclick = (e) => { e.preventDefault(); state.signAbort?.abort(); state.cancelWait = true; };
-  $('#switchwallet').onclick = async (e) => { e.preventDefault(); (await walletLib()).forgetWallet(); state.wallet = null; step('free'); connectWallet(); };
+  $('#switchwallet').onclick = async (e) => { e.preventDefault(); await (await walletLib()).forgetWallet(); state.wallet = null; step('free'); connectWallet(); };
 }
 
 init().catch(showError);

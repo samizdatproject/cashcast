@@ -83,9 +83,9 @@ Pay-per-second streaming has been tried before: Streamium (2015, Bitcoin payment
 
 Demo catalogue: CC0 tracks by HoliznaCC0 and Komiku; see [CREDITS.md](CREDITS.md). In this demo the artist share goes to the CashCast team. In production, artists register their own Bitcoin Cash address.
 
-## Built with AI assistance
+## How this was built
 
-This project was built by its author with Claude (Anthropic) as a coding assistant. The contract and server were independently reviewed (see [SECURITY.md](SECURITY.md)).
+Designed and directed by samizdatproject (solo). Much of the code was written with an AI coding assistant (Claude, by Anthropic), and every change was tested; the contract, server and browser each had a separate review (see [SECURITY.md](SECURITY.md)). Decisions, testing on mainnet and the demo are the builder's own.
 
 ## Licence
 

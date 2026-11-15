@@ -9,3 +9,4 @@ audio-src/
 *.db-wal
 *.db-journal
 deploy/cashcast.env
+web/demo.mp4

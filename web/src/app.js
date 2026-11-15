@@ -18,8 +18,18 @@ const state = {
   config: null, catalog: [], track: null, hls: null,
   session: null, sessionKey: null, wallet: null, budget: 0,
   bought: new Set(),              // paid keys this browser has fetched ("track/segment")
-  busy: false, approving: false, connecting: false, signAbort: null,
+  busy: false, approving: false, connecting: false, signAbort: null, cancelWait: false,
+  // What this browser itself decided, never overwritten by server replies: the approved budget,
+  // the pinned price, the checked contract address, the last total it signed, keys used before a reload.
+  trust: null,
 };
+
+// Server replies may update only these fields of the session; the id, token, address and
+// contract parameters are fixed at creation (and checked before the wallet signs).
+const SERVER_FIELDS = ['status', 'funding', 'paidAmount', 'used', 'credits', 'settleTxid', 'height', 'refundableFrom', 'priceSatsPerSegment'];
+function merge(data) {
+  for (const k of SERVER_FIELDS) if (k in data) state.session[k] = data[k];
+}
 
 // ---------- small helpers ----------
 const toHex = (b) => [...b].map((x) => x.toString(16).padStart(2, '0')).join('');
@@ -49,7 +59,7 @@ async function api(path, { method = 'GET', body, auth = false } = {}) {
 
 function save() {
   try {
-    if (state.session) localStorage.setItem(STORE, JSON.stringify({ ...state.session, sessionKey: toHex(state.sessionKey) }));
+    if (state.session) localStorage.setItem(STORE, JSON.stringify({ ...state.session, sessionKey: toHex(state.sessionKey), trust: state.trust }));
     else localStorage.removeItem(STORE);
   } catch { /* storage unavailable: the session won't survive a reload */ }
 }
@@ -72,40 +82,33 @@ function step(name) {
 function showError(e) { $('#error').textContent = e ? (e.message || String(e)) : ''; }
 
 // ---------- payments ----------
-// The price per segment is pinned in this browser when the listener approves; the server can
-// never raise it. The number of keys to pay for is counted here too, so a lying server cannot
-// make the browser sign away more than ~5 segments ahead.
-function pinnedPrice() {
-  const s = state.session;
-  const pinned = s.pinnedPrice || state.config.priceSatsPerSegment;
-  if (s.priceSatsPerSegment && s.priceSatsPerSegment > pinned) throw new Error('The server asked for a higher price than you approved; payments stopped.');
-  return pinned;
-}
-
+// Everything that decides how much to sign comes from this browser's own record (state.trust):
+// the price pinned at approval, the budget the listener chose, the last total it signed and the
+// keys it fetched. A lying server can therefore never make it sign more than ~5 segments ahead.
 async function signTotal(amount) {
   const s = state.session;
   const { secp256k1, sha256 } = await lib();
   const sig = toHex(secp256k1.signMessageHashSchnorr(state.sessionKey, sha256.hash(payMessage(s.funding.txid, s.funding.vout, amount))));
-  Object.assign(s, await api(`/api/sessions/${s.id}/pay`, { method: 'POST', body: { amount, sig }, auth: true }));
+  merge(await api(`/api/sessions/${s.id}/pay`, { method: 'POST', body: { amount, sig }, auth: true }));
+  state.trust.signed = amount;
   save();
 }
 
 // Keep `AHEAD` paid keys in hand, never past the end of the current track.
 async function ensureCredits() {
-  const s = state.session;
-  if (!s || s.status !== 'funded' || state.busy) return;
-  const price = pinnedPrice();
+  const s = state.session, T = state.trust;
+  if (!s || !T || s.status !== 'funded' || state.busy) return;
+  if (s.priceSatsPerSegment && s.priceSatsPerSegment > T.price) throw new Error('The server asked for a higher price than you approved; payments stopped.');
+  const price = T.price;
   const t = state.track;
   const boughtHere = [...state.bought].filter((k) => k.startsWith(`${t.trackId}/`)).length;
   const leftInTrack = Math.max(0, t.keyHashes.length - state.config.freeSegments - boughtHere);
-  const paidCredits = Math.floor(s.paidAmount / price);
-  // Keys used so far: our own count, or the server's (after a reload) but never more than we paid for.
-  const used = Math.max(state.bought.size, Math.min(s.used || 0, paidCredits));
+  const used = T.baseUsed + state.bought.size;
   const target = used + Math.min(AHEAD, leftInTrack);
-  if (paidCredits >= target) return;
-  const cap = Math.min(s.funding.satoshis, state.budgetCap || Infinity, state.config.maxSpend);
+  if (Math.floor(T.signed / price) >= target) return;
+  const cap = Math.min(T.budget, state.config.maxSpend);
   const amount = Math.min(target, Math.floor(cap / price)) * price;
-  if (amount <= s.paidAmount) { step('budget'); return; }
+  if (amount <= T.signed) { step('budget'); return; }
   state.busy = true;
   try { await signTotal(amount); renderMeter(); } finally { state.busy = false; }
 }
@@ -120,13 +123,15 @@ async function startSession(listenerAddress) {
 }
 
 async function refreshSession() {
-  Object.assign(state.session, await api(`/api/sessions/${state.session.id}`, { auth: true }));
+  merge(await api(`/api/sessions/${state.session.id}`, { auth: true }));
   save();
   return state.session;
 }
 
 async function waitForFunding() {
+  state.cancelWait = false;
   for (let i = 0; i < 150; i++) {
+    if (state.cancelWait) throw Object.assign(new Error('Cancelled.'), { name: 'AbortError' });
     if ((await refreshSession()).status === 'funded') return;
     await new Promise((r) => setTimeout(r, 2000));
   }
@@ -137,14 +142,15 @@ async function settle() {
   $('#audio').pause();
   // Stopped before any paid key: sign just the settlement fee so the rest comes back now,
   // instead of after the ~1 day timeout.
-  if (state.session.status === 'funded' && state.session.paidAmount === 0 && state.session.funding.satoshis > CLOSE_FEE_SATS + 546) {
+  if (state.session.status === 'funded' && state.trust && state.trust.signed === 0 && state.trust.budget > CLOSE_FEE_SATS + 546) {
     await signTotal(CLOSE_FEE_SATS);
   }
   const s = await api(`/api/sessions/${state.session.id}/settle`, { method: 'POST', auth: true });
-  Object.assign(state.session, s); save();
+  merge(s); save();
   if (s.status === 'settled') {
-    $('#paidtotal').textContent = money(s.paidAmount);
-    $('#returned').textContent = money(s.funding.satoshis - s.paidAmount);
+    const paid = Math.min(s.paidAmount, state.trust?.signed ?? s.paidAmount);
+    $('#paidtotal').textContent = money(paid);
+    $('#returned').textContent = money((state.trust?.budget ?? s.funding.satoshis) - paid);
     $('#settletx').href = EXPLORER + s.settleTxid;
     step('settled');
   } else {
@@ -239,11 +245,11 @@ function renderProgress() {
 function renderMeter() {
   const s = state.session;
   if (!s || s.status !== 'funded') return;
-  const budget = Math.min(s.funding.satoshis, state.config.maxSpend);
-  $('#approved').textContent = money(s.funding.satoshis);
-  $('#spent').textContent = money(s.paidAmount);
-  $('#unspent').textContent = money(s.funding.satoshis - s.paidAmount);
-  $('#gauge').style.width = `${Math.min(100, (s.paidAmount / budget) * 100)}%`;
+  const T = state.trust || { budget: s.funding.satoshis, signed: s.paidAmount };
+  $('#approved').textContent = money(T.budget);
+  $('#spent').textContent = money(T.signed);
+  $('#unspent').textContent = money(T.budget - T.signed);
+  $('#gauge').style.width = `${Math.min(100, (T.signed / T.budget) * 100)}%`;
   $('#fundtx').href = EXPLORER + s.funding.txid;
   renderProgress();
 }
@@ -306,32 +312,44 @@ async function approve() {
   const btn = $('#approve'); btn.disabled = true; btn.textContent = 'Approving…';
   showError('');
   try {
-    const satoshis = state.budget;
     const ownPkh = await ownRefundPkh();
     // Reuse an unfunded session only if it belongs to this wallet; otherwise start a new one.
-    const reusable = state.session?.status === 'open' && state.session.params.userPkh === ownPkh;
-    if (!reusable) await startSession(state.wallet.refundAddress);
-    state.session.pinnedPrice = state.session.pinnedPrice || state.config.priceSatsPerSegment;
-    state.budgetCap = satoshis;
+    const reusable = state.session?.status === 'open' && state.session.params.userPkh === ownPkh && state.trust;
+    if (!reusable) {
+      await startSession(state.wallet.refundAddress);
+      state.trust = { budget: state.budget, price: state.config.priceSatsPerSegment, signed: 0, baseUsed: 0, address: null };
+    }
+    // A funding already signed for this session keeps its amount, whatever chip is selected now.
+    const satoshis = state.session.signedHex ? state.trust.budget : (state.trust.budget = state.budget);
     const { secp256k1 } = await lib();
     (await verifyLib()).checkChannel({ session: state.session, ownPkh, satoshis, dev: state.config.dev,
       ownSessionPk: toHex(secp256k1.derivePublicKeyCompressed(state.sessionKey)) });
+    state.trust.address = state.session.address; // the wallet pays exactly this checked address
     save();
     $('#signamount').textContent = `${money(satoshis)} (${satoshis.toLocaleString()} sats)`;
     $('#fundstep').textContent = 'Check your wallet';
     step('signing');
     if ((await refreshSession()).status !== 'funded') {
       if (state.config.dev) {
-        await api('/api/dev/fund', { method: 'POST', body: { address: state.session.address, satoshis } });
+        await api('/api/dev/fund', { method: 'POST', body: { address: state.trust.address, satoshis } });
       } else {
         // A funding signed earlier for this session is re-sent, never signed a second time.
         if (!state.session.signedHex) {
           state.signAbort = new AbortController();
-          const signed = await (await walletLib()).fund({ contractAddress: state.session.address, satoshis, api, signal: state.signAbort.signal });
+          const signed = await (await walletLib()).fund({ contractAddress: state.trust.address, satoshis, api, signal: state.signAbort.signal });
           state.session.signedHex = signed.hex; save();
         }
         $('#fundstep').textContent = 'Sending…';
-        await api('/api/broadcast', { method: 'POST', body: { hex: state.session.signedHex } }).catch((e) => console.warn('broadcast:', e.message));
+        try {
+          await api('/api/broadcast', { method: 'POST', body: { hex: state.session.signedHex } });
+        } catch (e) {
+          // Already known or already mined: fine, keep waiting. Anything that means it can never
+          // confirm (coins spent elsewhere, invalid): forget it so the next approval signs afresh.
+          if (!/already|known|txn-already|exists/i.test(e.message)) {
+            delete state.session.signedHex; save();
+            throw new Error(`The payment could not be sent (${e.message}). Nothing was spent; please approve again.`);
+          }
+        }
       }
       $('#fundstep').textContent = 'Waiting for the network…';
       await waitForFunding();
@@ -351,13 +369,20 @@ async function resume() {
   const saved = loadSaved();
   if (!saved) return;
   state.sessionKey = fromHex(saved.sessionKey); delete saved.sessionKey;
+  const savedTrust = saved.trust; delete saved.trust;
   state.session = saved;
+  state.trust = savedTrust || null; // restore before anything saves
   try { await refreshSession(); } catch (e) {
     if (e.status === 401 || e.status === 404) { state.session = null; save(); }
     return; // transient error: keep the session for the next visit
   }
   const s = state.session;
-  if (s.status === 'funded' && s.height < s.params.timeout - 12) { step('funded'); renderMeter(); return; }
+  if (state.trust) {
+    // Keys used before the reload: the server's count, but never more than this browser paid for.
+    state.trust.baseUsed = Math.min(s.used || 0, Math.floor(state.trust.signed / state.trust.price));
+    state.bought.clear();
+  }
+  if (s.status === 'funded' && state.trust && s.height < s.params.timeout - 12) { step('funded'); renderMeter(); return; }
   if (['funded', 'expired', 'closed', 'settling'].includes(s.status)) { showWaiting(s); return; }
   if (s.status === 'open') return; // never funded: the next approval reuses it
   state.session = null; save();       // settled or refunded: done
@@ -391,8 +416,8 @@ async function init() {
   $('#connect').onclick = connectWallet;
   $('#approve').onclick = approve;
   $('#stop').onclick = $('#stop2').onclick = () => settle().catch(showError);
-  $('#again').onclick = () => { state.session = null; state.bought.clear(); save(); if (state.wallet) { renderChips(); step('approve'); } else step('free'); };
-  $('#dismiss').onclick = () => { state.session = null; save(); step('free'); };
+  $('#again').onclick = () => { state.session = null; state.trust = null; state.bought.clear(); save(); if (state.wallet) { renderChips(); step('approve'); } else step('free'); };
+  $('#dismiss').onclick = () => { state.session = null; state.trust = null; save(); step('free'); };
   $('#refundnow').onclick = async () => {
     try {
       const r = await api(`/api/sessions/${state.session.id}/refund`, { method: 'POST' });
@@ -402,7 +427,7 @@ async function init() {
     } catch (e) { showError(e); }
   };
   $('#cancelpair').onclick = async (e) => { e.preventDefault(); (await walletLib()).cancelPairing(); step('free'); };
-  $('#cancelsign').onclick = (e) => { e.preventDefault(); state.signAbort?.abort(); };
+  $('#cancelsign').onclick = (e) => { e.preventDefault(); state.signAbort?.abort(); state.cancelWait = true; };
   $('#switchwallet').onclick = async (e) => { e.preventDefault(); (await walletLib()).forgetWallet(); state.wallet = null; step('free'); connectWallet(); };
 }
 

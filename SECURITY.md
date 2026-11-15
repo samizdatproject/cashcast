@@ -10,7 +10,7 @@ All of this is enforced by the contract, not by the CashCast server:
 - **Keyless refund.** After the block-height timeout anyone can return the whole balance to the listener. The refund must have exactly one output, paid to the listener; the fee is capped (`maxRefundFee`), so a bot cannot skim it.
 - **Tokens are untouchable.** A token sent to a channel by mistake cannot be spent by either path.
 
-**The browser checks the channel itself before the wallet signs** (`web/src/verify.js`): it rebuilds the contract address from the listener's own refund key, its own session key and CashCast's key pinned into the page at build time, and refuses unless the timeout is 24–200 blocks away (estimated from the clock), the refund-fee cap is at most 2,000 sats and the budget is within limits. It funds only the plain (non-token) address. The signed funding transaction must re-encode to exactly the bytes sent for signing.
+**The browser checks the channel itself before the wallet signs** (`web/src/verify.js`): it rebuilds the contract address from the listener's own refund key, its own session key and CashCast's key pinned into the page at build time, and refuses unless the timeout is 24–300 blocks away (estimated from the clock), the refund-fee cap is at most 2,000 sats and the budget is within limits. It funds only the plain (non-token) address. The signed funding transaction must re-encode to exactly the bytes sent for signing.
 
 **The browser bounds its own payments:** the price per segment is pinned when the listener approves (the server cannot raise it), and the browser counts the keys it fetched itself, so it never signs more than about 5 segments ahead, whatever the server says.
 

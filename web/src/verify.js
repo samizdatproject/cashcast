@@ -10,7 +10,7 @@ const PINNED_PROVIDER_PK = typeof CASHCAST_PROVIDER_PK === 'string' ? CASHCAST_P
 export const LIMITS = {
   maxBudgetSats: 1_000_000,  // hard cap on what the page will ever ask a wallet to send (~$2)
   maxRefundFee: 2_000,       // the keyless refund may never spend more than this on fees
-  maxTimeoutBlocks: 200,     // the money is never locked for more than ~1.5 days
+  maxTimeoutBlocks: 300,     // the money is never locked for more than ~2 days (slack for clock-estimate drift)
   minTimeoutBlocks: 24,
 };
 
@@ -24,7 +24,8 @@ export function checkChannel({ session, ownPkh, ownSessionPk, satoshis, dev }) {
   const fail = (why) => { throw new Error(`Refusing to pay: ${why}. Please reload and try again.`); };
   if (p.userPkh !== ownPkh) fail('the refund address is not your wallet');
   if (p.sessionPk !== ownSessionPk) fail('the session key is not this browser\'s');
-  if (!dev && PINNED_PROVIDER_PK && p.providerPk !== PINNED_PROVIDER_PK) fail('unknown CashCast key');
+  if (!dev && !PINNED_PROVIDER_PK) fail('this page was built without CashCast\'s key');
+  if (!dev && p.providerPk !== PINNED_PROVIDER_PK) fail('unknown CashCast key');
   if (!Number.isInteger(p.timeout) || p.timeout >= 500_000_000) fail('bad timeout');
   if (!dev) {
     const ahead = p.timeout - estimatedHeight();

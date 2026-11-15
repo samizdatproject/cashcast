@@ -103,7 +103,8 @@ async function ensureCredits() {
   const t = state.track;
   const boughtHere = [...state.bought].filter((k) => k.startsWith(`${t.trackId}/`)).length;
   const leftInTrack = Math.max(0, t.keyHashes.length - state.config.freeSegments - boughtHere);
-  const used = T.baseUsed + state.bought.size;
+  // Keys used: our own (persisted) count, or the server's if higher, but never more than we paid for.
+  const used = Math.max(state.bought.size, Math.min(s.used || 0, Math.floor(T.signed / price)));
   const target = used + Math.min(AHEAD, leftInTrack);
   if (Math.floor(T.signed / price) >= target) return;
   const cap = Math.min(T.budget, state.config.maxSpend);
@@ -187,7 +188,10 @@ function play(track, autoplay = true) {
   hls.attachMedia($('#audio'));
   hls.on(Hls.Events.FRAG_CHANGED, () => ensureCredits().catch(showError));
   hls.on(Hls.Events.KEY_LOADED, (_, { frag }) => {
-    if (frag?.sn >= state.config.freeSegments) state.bought.add(`${track.trackId}/${frag.sn}`);
+    if (frag?.sn >= state.config.freeSegments) {
+      state.bought.add(`${track.trackId}/${frag.sn}`);
+      if (state.trust) { state.trust.keys = [...state.bought]; save(); }
+    }
     ensureCredits().catch(showError);
   });
   hls.on(Hls.Events.ERROR, (_, data) => {
@@ -320,7 +324,7 @@ async function approve() {
     const reusable = state.session?.status === 'open' && state.session.params.userPkh === ownPkh && state.trust && fresh;
     if (!reusable) {
       await startSession(state.wallet.refundAddress);
-      state.trust = { budget: state.budget, price: state.config.priceSatsPerSegment, signed: 0, baseUsed: 0, address: null };
+      state.trust = { budget: state.budget, price: state.config.priceSatsPerSegment, signed: 0, keys: [], address: null };
     }
     // A funding already signed for this session keeps its amount, whatever chip is selected now.
     const satoshis = state.session.signedHex ? state.trust.budget : (state.trust.budget = state.budget);
@@ -348,10 +352,11 @@ async function approve() {
         } catch (e) {
           // Already known or already mined: fine, keep waiting. Anything that means it can never
           // confirm (coins spent elsewhere, invalid): forget it so the next approval signs afresh.
-          if (!/already|known|txn-already|exists/i.test(e.message)) {
+          if (/missingorspent|missing inputs|mandatory-script-verify|bad-txns|txn-mempool-conflict|non-mandatory|dust|insufficient/i.test(e.message)) {
             delete state.session.signedHex; save();
             throw new Error(`The payment could not be sent (${e.message}). Nothing was spent; please approve again.`);
           }
+          console.warn('broadcast:', e.message); // unclear (timeout, proxy error): it may have gone through; keep waiting
         }
       }
       $('#fundstep').textContent = 'Waiting for the network…';
@@ -380,11 +385,8 @@ async function resume() {
     return; // transient error: keep the session for the next visit
   }
   const s = state.session;
-  if (state.trust) {
-    // Keys used before the reload: the server's count, but never more than this browser paid for.
-    state.trust.baseUsed = Math.min(s.used || 0, Math.floor(state.trust.signed / state.trust.price));
-    state.bought.clear();
-  }
+  // Keys bought before the reload are remembered, so replaying them is not paid for twice.
+  state.bought = new Set(state.trust?.keys || []);
   if (s.status === 'funded' && state.trust && s.height < s.params.timeout - 12) { step('funded'); renderMeter(); return; }
   if (['funded', 'expired', 'closed', 'settling'].includes(s.status)) { showWaiting(s); return; }
   if (s.status === 'open') return; // never funded: the next approval reuses it
@@ -394,9 +396,9 @@ async function resume() {
 async function init() {
   [state.config, state.catalog] = await Promise.all([api('/api/config'), api('/api/catalog')]);
   const c = state.config;
-  $('#rate').textContent = c.centsPerMinute && c.usdPerBch
-    ? `${c.centsPerMinute}¢ / minute · first minute free`
-    : `${c.priceSatsPerSegment} sats / 4 s · first minute free`;
+  // The rate shown is computed from the price actually charged per 4-second segment.
+  const perMinute = c.priceSatsPerSegment * 15;
+  $('#rate').textContent = `${c.usdPerBch ? money(perMinute) : `${perMinute.toLocaleString()} sats`} / minute · first minute free`;
   $('#listener').hidden = !c.dev;
   if (state.catalog[0]) play(state.catalog[0], false);
   await resume();

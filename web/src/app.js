@@ -249,14 +249,42 @@ function renderProgress() {
   } else $('#paidzone').style.width = '0';
 }
 
+// Seconds of paid audio actually heard, counted from real playback (seeks and the free minute
+// don't count). Drives the live meter: Used goes up and Left goes down every second.
+let lastPos = null;
+function countHeard() {
+  const a = $('#audio'), pos = a.currentTime, prev = lastPos;
+  lastPos = pos;
+  const T = state.trust;
+  if (!T || state.session?.status !== 'funded' || a.paused || prev === null) return;
+  const d = pos - prev;
+  if (d > 0 && d < 1.5 && pos > state.config.freeSegments * 4) {
+    const before = Math.floor(T.heard || 0);
+    T.heard = (T.heard || 0) + d;
+    if (Math.floor(T.heard) !== before) save();
+  }
+}
+
+const cents = (sats) => state.config?.usdPerBch ? `${((sats / 1e8) * state.config.usdPerBch * 100).toFixed(2)}¢` : '';
+
 function renderMeter() {
   const s = state.session;
   if (!s || s.status !== 'funded') return;
-  const T = state.trust || { budget: s.funding.satoshis, signed: s.paidAmount };
+  const T = state.trust || { budget: s.funding.satoshis, signed: s.paidAmount, price: s.priceSatsPerSegment };
+  const perSecond = T.price / 4;
+  // What was heard, never more than what was signed. (The signed total runs ~20 s ahead.)
+  const used = Math.min(T.signed, Math.round(Math.floor(T.heard || 0) * perSecond));
+  const a = $('#audio'), inFree = a.currentTime < state.config.freeSegments * 4;
+  const ticking = !a.paused && !inFree;
+  $('#livedot').classList.toggle('on', ticking);
+  $('#livestate').textContent = a.paused ? 'Paused' : inFree ? 'Free minute · nothing used' : `Playing · ${Math.round(perSecond)} sats / second`;
   $('#approved').textContent = money(T.budget);
-  $('#spent').textContent = money(T.signed);
-  $('#unspent').textContent = money(T.budget - T.signed);
-  $('#gauge').style.width = `${Math.min(100, (T.signed / T.budget) * 100)}%`;
+  $('#used').textContent = used.toLocaleString();
+  $('#usedc').textContent = cents(used);
+  $('#left').textContent = (T.budget - used).toLocaleString();
+  $('#leftc').textContent = cents(T.budget - used);
+  $('#spent').textContent = `${T.signed.toLocaleString()} sats`;
+  $('#gauge').style.width = `${Math.min(100, (used / T.budget) * 100)}%`;
   $('#fundtx').href = EXPLORER + s.funding.txid;
   renderProgress();
 }
@@ -313,7 +341,7 @@ async function ensureSession(ownPkh) {
   const reusable = state.session?.status === 'open' && state.session.params.userPkh === ownPkh && state.trust && fresh;
   if (!reusable) {
     await startSession(state.wallet.refundAddress);
-    state.trust = { budget: state.budget, price: state.config.priceSatsPerSegment, signed: 0, keys: [], address: null };
+    state.trust = { budget: state.budget, price: state.config.priceSatsPerSegment, signed: 0, heard: 0, keys: [], address: null };
   }
 }
 
@@ -432,8 +460,9 @@ async function init() {
   a.addEventListener('play', () => { $('#playbtn').classList.add('on'); $('#playbtn').ariaLabel = 'Pause'; });
   // While the free minute plays, quietly load the wallet code so "Connect wallet" is instant.
   a.addEventListener('playing', () => setTimeout(() => { walletLib(); verifyLib(); lib(); }, 3000), { once: true });
-  a.addEventListener('pause', () => { $('#playbtn').classList.remove('on'); $('#playbtn').ariaLabel = 'Play'; });
-  a.addEventListener('timeupdate', renderProgress);
+  a.addEventListener('pause', () => { $('#playbtn').classList.remove('on'); $('#playbtn').ariaLabel = 'Play'; lastPos = null; renderMeter(); });
+  a.addEventListener('timeupdate', () => { countHeard(); if (state.session?.status === 'funded') renderMeter(); else renderProgress(); });
+  a.addEventListener('seeking', () => { lastPos = null; });
   a.addEventListener('ended', () => {
     const i = state.catalog.indexOf(state.track);
     if (state.catalog[i + 1]) play(state.catalog[i + 1]);

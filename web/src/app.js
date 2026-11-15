@@ -376,6 +376,8 @@ async function init() {
   const a = $('#audio');
   $('#playbtn').onclick = () => (a.paused ? a.play() : a.pause());
   a.addEventListener('play', () => { $('#playbtn').classList.add('on'); $('#playbtn').ariaLabel = 'Pause'; });
+  // While the free minute plays, quietly load the wallet code so "Connect wallet" is instant.
+  a.addEventListener('playing', () => setTimeout(() => { walletLib(); verifyLib(); lib(); }, 3000), { once: true });
   a.addEventListener('pause', () => { $('#playbtn').classList.remove('on'); $('#playbtn').ariaLabel = 'Play'; });
   a.addEventListener('timeupdate', renderProgress);
   a.addEventListener('ended', () => {

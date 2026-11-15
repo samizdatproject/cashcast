@@ -314,7 +314,10 @@ async function approve() {
   try {
     const ownPkh = await ownRefundPkh();
     // Reuse an unfunded session only if it belongs to this wallet; otherwise start a new one.
-    const reusable = state.session?.status === 'open' && state.session.params.userPkh === ownPkh && state.trust;
+    // ...and only while its timeout is still comfortably far away (an old unfunded session is dropped).
+    const { estimatedHeight } = await verifyLib();
+    const fresh = state.config.dev || (state.session && state.session.params.timeout - estimatedHeight() > 100);
+    const reusable = state.session?.status === 'open' && state.session.params.userPkh === ownPkh && state.trust && fresh;
     if (!reusable) {
       await startSession(state.wallet.refundAddress);
       state.trust = { budget: state.budget, price: state.config.priceSatsPerSegment, signed: 0, baseUsed: 0, address: null };

@@ -237,3 +237,16 @@ test('after the timeout an unsettled channel is refunded to the listener (button
   w.provider.setBlockHeight(s2.params.timeout);
   assert.equal((await w.app.sweep()).length, 1);
 });
+
+test('wallet coin lookup: all addresses at once, tagged with their address, tokens left out, bad addresses refused', async () => {
+  const w = world();
+  const [a, b, c] = [addr(), addr(), addr()];
+  w.provider.addUtxo(a, randomUtxo({ satoshis: 10_000n }));
+  w.provider.addUtxo(c, randomUtxo({ satoshis: 7_000n }));
+  w.provider.addUtxo(c, randomUtxo({ satoshis: 5_000n, token: { category: binToHex(randomBytes(32)), amount: 1n } }));
+  const res = await w.app.inject({ method: 'POST', url: '/api/utxos', payload: { addresses: [a, b, c] } });
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual(res.json().map((u) => [u.address, u.satoshis]), [[a, 10_000], [c, 7_000]]);
+  const bad = await w.app.inject({ method: 'POST', url: '/api/utxos', payload: { addresses: [a, 'nonsense'] } });
+  assert.equal(bad.statusCode, 400);
+});

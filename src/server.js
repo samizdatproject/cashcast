@@ -24,7 +24,7 @@ export function buildServer(cfg) {
     provider, db, masterSecret, providerKey, mediaDir, payouts,
     priceSatsPerSegment = 150, centsPerMinute = null, usdPrice = null, freeSegments = 15, sessionBlocks = 144, safetyBlocks = 12,
     maxRefundFee = 1000, minFunding = 5000, maxSpend = 500_000, idleMs = 10 * 60_000, fundingCheckMs = 5_000,
-    heightTtlMs = 30_000, dev = false, logger = false, rateLimitMax = 600, trustProxy = false,
+    heightTtlMs = 30_000, dev = false, autoSettle = true, logger = false, rateLimitMax = 600, trustProxy = false,
   } = cfg;
   // Fail at startup, not at the first settlement: payouts must parse and add up to 100%.
   if (!payouts?.length || payouts.reduce((a, p) => a + p.bps, 0) !== 10_000) throw new Error('payout bps must sum to 10000');
@@ -118,7 +118,7 @@ export function buildServer(cfg) {
   app.get('/api/config', async () => {
     const price = await currentPrice();
     return { providerPk, priceSatsPerSegment: price.sats, usdPerBch: price.usd, centsPerMinute, freeSegments, sessionBlocks,
-      maxRefundFee, minFunding, maxSpend, dev };
+      maxRefundFee, minFunding, maxSpend, dev, autoSettle };
   });
   app.get('/api/catalog', async () => catalog);
 
@@ -188,14 +188,13 @@ export function buildServer(cfg) {
   app.post('/api/utxos', { config: { rateLimit: { max: 30, timeWindow: '1 minute' } } }, async (req, reply) => {
     const addresses = req.body?.addresses;
     if (!Array.isArray(addresses) || addresses.length === 0 || addresses.length > 40) return reply.code(400).send({ error: '1–40 addresses' });
-    const out = [];
     for (const address of addresses) {
       try { listenerPkh(String(address)); } catch { return reply.code(400).send({ error: `not a P2PKH address: ${address}` }); }
-      for (const u of await provider.getUtxos(String(address))) {
-        if (!u.token) out.push({ address, txid: u.txid, vout: u.vout, satoshis: Number(u.satoshis) });
-      }
     }
-    return out;
+    // All addresses at once: one by one took ~7 s for a 20-address wallet scan.
+    const lists = await Promise.all(addresses.map((a) => provider.getUtxos(String(a))));
+    return lists.flatMap((utxos, n) => utxos.filter((u) => !u.token)
+      .map((u) => ({ address: addresses[n], txid: u.txid, vout: u.vout, satoshis: Number(u.satoshis) })));
   });
   app.post('/api/broadcast', { config: { rateLimit: { max: 10, timeWindow: '1 minute' } } }, async (req, reply) => {
     const hex = String(req.body?.hex || '');

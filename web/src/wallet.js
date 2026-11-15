@@ -115,13 +115,24 @@ export function connect(qrElement, linkElement, onStatus) {
 }
 
 // Build the funding transaction, have the wallet sign it, and return the signed hex.
-export async function fund({ contractAddress, satoshis, api, signal }) {
+function ownAddresses() {
   const paths = [];
   for (const branch of [RECEIVE, CHANGE]) for (let i = 0; i < SCAN; i++) paths.push({ branch, i, address: addressAt(branch, i) });
-  const byAddress = new Map(paths.filter((p) => p.address).map((p) => [p.address, p]));
-  const coins = (await api('/api/utxos', { method: 'POST', body: { addresses: [...byAddress.keys()] } }))
-    .filter((c) => byAddress.has(c.address))   // only coins at our own addresses
+  return new Map(paths.filter((p) => p.address).map((p) => [p.address, p]));
+}
+
+// The wallet's spendable coins (only coins at its own addresses), largest first. Looked up ahead
+// of time, while the listener picks a budget, so the wallet is asked to sign at once.
+export async function loadCoins(api) {
+  const byAddress = ownAddresses();
+  return (await api('/api/utxos', { method: 'POST', body: { addresses: [...byAddress.keys()] } }))
+    .filter((c) => byAddress.has(c.address))
     .sort((a, b) => b.satoshis - a.satoshis);
+}
+
+export async function fund({ contractAddress, satoshis, api, signal, coins }) {
+  const byAddress = ownAddresses();
+  coins = (coins || await loadCoins(api)).filter((c) => byAddress.has(c.address));
 
   const contractLock = cashAddressToLockingBytecode(contractAddress).bytecode;
   const changeAddress = addressAt(CHANGE, 0);

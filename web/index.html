@@ -73,12 +73,12 @@
       <div class="step" data-step="funded" hidden>
         <div class="meter">
           <div><span class="k">Approved</span><b id="approved"></b></div>
-          <div><span class="k">Listened</span><b id="spent"></b></div>
+          <div><span class="k">Paid so far</span><b id="spent"></b></div>
           <div><span class="k">Comes back to you</span><b id="unspent"></b></div>
         </div>
         <div class="gauge"><div id="gauge"></div></div>
         <button class="main" id="stop">Stop &amp; settle</button>
-        <p class="fine"><a id="fundtx" target="_blank" rel="noopener">funding transaction</a> · settles on its own after 10 idle minutes · stopping costs at least the network fee (about 0.15¢)</p>
+        <p class="fine"><a id="fundtx" target="_blank" rel="noopener">funding transaction</a> · <span id="autosettle"></span> · stopping costs at least the network fee (about 0.15¢)</p>
       </div>
 
       <div class="step" data-step="budget" hidden>
@@ -87,7 +87,7 @@
       </div>
 
       <div class="step" data-step="settled" hidden>
-        <p><b>Done.</b> You listened for <b id="paidtotal"></b>; <b id="returned"></b> went back to your wallet.</p>
+        <p><b>Done.</b> You paid <b id="paidtotal"></b>; <b id="returned"></b> went back to your wallet.</p>
         <p class="fine"><a id="settletx" target="_blank" rel="noopener">settlement transaction</a></p>
         <button class="main" id="again">Listen more</button>
       </div>

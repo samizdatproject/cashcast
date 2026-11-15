@@ -33,6 +33,9 @@ const providerKey = hexToBin(secret(`provider-${network}.key`, () => binToHex(ge
 
 const provider = network === 'mainnet' ? new FailoverProvider('mainnet', undefined, { log: (m) => console.log(m) }) : new MockNetworkProvider();
 if (network === 'mock') provider.setBlockHeight(950_000);
+// Start on whichever public server answers first, and re-check every few minutes, so a stalled
+// server is not the first one a listener's request waits on.
+if (network === 'mainnet') { provider.warmUp(); setInterval(() => provider.warmUp(), 5 * 60_000).unref(); }
 
 const payouts = [
   { address: process.env.CASHCAST_ARTIST_ADDRESS, bps: 9000 },
@@ -48,6 +51,7 @@ const app = buildServer({
   provider, db: openDb(network === 'mock' ? ':memory:' : join(root, `cashcast-${network}.db`)), masterSecret, providerKey,
   mediaDir: join(root, 'media', network), payouts, logger: { level: 'info' }, dev: network === 'mock',
   trustProxy: process.env.CASHCAST_TRUST_PROXY === '1',
+  autoSettle: process.env.CASHCAST_SWEEP !== 'off', // tells the page whether idle sessions settle on their own
   // 1 cent per minute at the live BCH price (mock mode: a fixed $200 so it works offline).
   centsPerMinute: Number(process.env.CASHCAST_CENTS_PER_MINUTE || 1),
   usdPrice: network === 'mock' ? async () => 200 : livePrice(),

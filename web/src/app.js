@@ -18,6 +18,7 @@ const state = {
   config: null, catalog: [], track: null, hls: null,
   session: null, sessionKey: null, wallet: null, budget: 0,
   bought: new Set(),              // paid keys this browser has fetched ("track/segment")
+  prepared: null, coins: null,    // background preparation while the listener picks a budget
   busy: false, approving: false, connecting: false, signAbort: null, cancelWait: false,
   // What this browser itself decided, never overwritten by server replies: the approved budget,
   // the pinned price, the checked contract address, the last total it signed, keys used before a reload.
@@ -101,6 +102,8 @@ async function ensureCredits() {
   if (s.priceSatsPerSegment && s.priceSatsPerSegment > T.price) throw new Error('The server asked for a higher price than you approved; payments stopped.');
   const price = T.price;
   const t = state.track;
+  // Nothing is paid while the free minute still has more than ~28 s to go.
+  if (Math.floor(($('#audio').currentTime || 0) / 4) < state.config.freeSegments - AHEAD - 2) return;
   const boughtHere = [...state.bought].filter((k) => k.startsWith(`${t.trackId}/`)).length;
   const leftInTrack = Math.max(0, t.keyHashes.length - state.config.freeSegments - boughtHere);
   // Keys used: our own (persisted) count, or the server's if higher, but never more than we paid for.
@@ -297,8 +300,32 @@ async function connectWallet() {
     $('#refund').textContent = state.wallet.refundAddress;
     renderChips();
     step('approve');
+    prepare();
   } catch (e) { if (e.name !== 'AbortError') showError(e); step('free'); }
   finally { state.connecting = false; }
+}
+
+// Reuse an unfunded session only if it belongs to this wallet and its timeout is still
+// comfortably far away; otherwise start a new one.
+async function ensureSession(ownPkh) {
+  const { estimatedHeight } = await verifyLib();
+  const fresh = state.config.dev || (state.session && state.session.params.timeout - estimatedHeight() > 100);
+  const reusable = state.session?.status === 'open' && state.session.params.userPkh === ownPkh && state.trust && fresh;
+  if (!reusable) {
+    await startSession(state.wallet.refundAddress);
+    state.trust = { budget: state.budget, price: state.config.priceSatsPerSegment, signed: 0, keys: [], address: null };
+  }
+}
+
+// While the listener picks a budget, open the session and look up the wallet's coins, so that
+// "Approve" goes straight to the wallet. Errors are ignored here; approve() simply retries.
+function prepare() {
+  state.coins = null;
+  state.prepared = (async () => {
+    await ensureSession(await ownRefundPkh());
+    if (!state.config.dev) state.coins = { at: Date.now(), list: await (await walletLib()).loadCoins(api) };
+  })();
+  state.prepared.catch((e) => console.warn('prepare:', e.message));
 }
 
 // One approval at a time: a double click must never open two sessions or sign twice.
@@ -316,16 +343,9 @@ async function approve() {
   const btn = $('#approve'); btn.disabled = true; btn.textContent = 'Approving…';
   showError('');
   try {
+    await state.prepared?.catch(() => {}); // a background preparation still running: let it finish
     const ownPkh = await ownRefundPkh();
-    // Reuse an unfunded session only if it belongs to this wallet; otherwise start a new one.
-    // ...and only while its timeout is still comfortably far away (an old unfunded session is dropped).
-    const { estimatedHeight } = await verifyLib();
-    const fresh = state.config.dev || (state.session && state.session.params.timeout - estimatedHeight() > 100);
-    const reusable = state.session?.status === 'open' && state.session.params.userPkh === ownPkh && state.trust && fresh;
-    if (!reusable) {
-      await startSession(state.wallet.refundAddress);
-      state.trust = { budget: state.budget, price: state.config.priceSatsPerSegment, signed: 0, keys: [], address: null };
-    }
+    await ensureSession(ownPkh);
     // A funding already signed for this session keeps its amount, whatever chip is selected now.
     const satoshis = state.session.signedHex ? state.trust.budget : (state.trust.budget = state.budget);
     const { secp256k1 } = await lib();
@@ -343,7 +363,10 @@ async function approve() {
         // A funding signed earlier for this session is re-sent, never signed a second time.
         if (!state.session.signedHex) {
           state.signAbort = new AbortController();
-          const signed = await (await walletLib()).fund({ contractAddress: state.trust.address, satoshis, api, signal: state.signAbort.signal });
+          // Coins looked up in the background are used if they are recent; otherwise they are fetched now.
+          const coins = state.coins && Date.now() - state.coins.at < 120_000 ? state.coins.list : undefined;
+          state.coins = null;
+          const signed = await (await walletLib()).fund({ contractAddress: state.trust.address, satoshis, api, signal: state.signAbort.signal, coins });
           state.session.signedHex = signed.hex; save();
         }
         $('#fundstep').textContent = 'Sending…';
@@ -400,6 +423,7 @@ async function init() {
   const perMinute = c.priceSatsPerSegment * 15;
   $('#rate').textContent = `${c.usdPerBch ? money(perMinute) : `${perMinute.toLocaleString()} sats`} / minute · first minute free`;
   $('#listener').hidden = !c.dev;
+  $('#autosettle').textContent = c.autoSettle ? 'settles on its own after 10 idle minutes' : 'press Stop & settle when you are done';
   if (state.catalog[0]) play(state.catalog[0], false);
   await resume();
 
@@ -421,7 +445,7 @@ async function init() {
   $('#connect').onclick = connectWallet;
   $('#approve').onclick = approve;
   $('#stop').onclick = $('#stop2').onclick = () => settle().catch(showError);
-  $('#again').onclick = () => { state.session = null; state.trust = null; state.bought.clear(); save(); if (state.wallet) { renderChips(); step('approve'); } else step('free'); };
+  $('#again').onclick = () => { state.session = null; state.trust = null; state.bought.clear(); save(); if (state.wallet) { renderChips(); step('approve'); prepare(); } else step('free'); };
   $('#dismiss').onclick = () => { state.session = null; state.trust = null; save(); step('free'); };
   $('#refundnow').onclick = async () => {
     try {

@@ -49,6 +49,14 @@ export class FailoverProvider {
     throw last;
   }
 
+  // Ask every server for the block height at once and make the first to answer the current one.
+  async warmUp() {
+    try {
+      const i = await Promise.any(this.providers.map(({ p }, n) => withTimeout(p.getBlockHeight(), this.timeoutMs).then(() => n)));
+      if (i !== this.current) { this.log(`chain: using ${this.providers[i].hostname} (answered first)`); this.current = i; }
+    } catch { this.log('chain: no server answered the warm-up'); }
+  }
+
   getUtxos(address) { return this.call('getUtxos', [address]); }
   getUtxosForLockingBytecode(bytecode) { return this.call('getUtxosForLockingBytecode', [bytecode]); }
   getBlockHeight() { return this.call('getBlockHeight', []); }

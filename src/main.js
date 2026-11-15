@@ -38,7 +38,7 @@ if (network === 'mock') provider.setBlockHeight(950_000);
 if (network === 'mainnet') { provider.warmUp(); setInterval(() => provider.warmUp(), 5 * 60_000).unref(); }
 
 const payouts = [
-  { address: process.env.CASHCAST_ARTIST_ADDRESS, bps: 9000, label: 'Artist' },
+  { address: process.env.CASHCAST_ARTIST_ADDRESS, bps: 9000, label: 'Creator' },
   { address: process.env.CASHCAST_PLATFORM_ADDRESS, bps: 1000, label: 'CashCast' },
 ];
 if (payouts.some((p) => !p.address)) {
@@ -51,6 +51,8 @@ const app = buildServer({
   provider, db: openDb(network === 'mock' ? ':memory:' : join(root, `cashcast-${network}.db`)), masterSecret, providerKey,
   mediaDir: join(root, 'media', network), payouts, logger: { level: 'info' }, dev: network === 'mock',
   trustProxy: process.env.CASHCAST_TRUST_PROXY === '1',
+  // Free preview length in 4-second segments (15 = one minute; the live demo uses 1, so paying starts at 0:04).
+  freeSegments: Number(process.env.CASHCAST_FREE_SEGMENTS || 15),
   autoSettle: process.env.CASHCAST_SWEEP !== 'off', // tells the page whether idle sessions settle on their own
   // 1 cent per minute at the live BCH price (mock mode: a fixed $200 so it works offline).
   centsPerMinute: Number(process.env.CASHCAST_CENTS_PER_MINUTE || 1),

@@ -1,6 +1,6 @@
 # CashCast
 
-**Music by the second, paid in Bitcoin Cash.** The first minute of every track is free. To keep listening, you approve a small budget once from your wallet; you pay only for the seconds you actually hear, and whatever you don't use comes back to your wallet automatically.
+**Pay by the second for content — music, video, podcasts — in Bitcoin Cash.** The demo plays music: the first seconds of every track are free (one minute by default; the live demo starts charging at 0:04). To keep listening, you approve a small budget once from your wallet; you pay only for the seconds you actually hear, and whatever you don't use comes back to your wallet automatically.
 
 Live demo: https://cashcast.cls9.com · Built for [BCH BLAZE 2026](https://dorahacks.io/hackathon/blaze2026).
 

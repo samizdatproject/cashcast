@@ -3,8 +3,8 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <title>CashCast — music by the second</title>
-  <meta name="description" content="Pay per second for music in Bitcoin Cash. Approve a small budget once; whatever you don't listen to comes back automatically.">
+  <title>CashCast — pay by the second</title>
+  <meta name="description" content="Pay by the second for music, video and other content in Bitcoin Cash. Approve a small budget once; whatever you don't use comes back automatically.">
   <link rel="icon" href="/icon.svg" type="image/svg+xml">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -22,7 +22,7 @@
   <main>
     <header>
       <h1>Cash<span>Cast</span></h1>
-      <p class="tag">Music by the second, paid in Bitcoin Cash. Approve a small budget once — whatever you don't hear comes back to you automatically.</p>
+      <p class="tag">Pay by the second for content — music, video, podcasts, courses — in Bitcoin Cash. Approve a small budget once; whatever you don't use comes back to you automatically.</p>
     </header>
 
     <section class="player" aria-label="Player">
@@ -45,7 +45,7 @@
 
     <section class="panel" aria-live="polite">
       <div class="step" data-step="free">
-        <p><b>The first minute is free.</b> To keep listening, connect a Bitcoin Cash wallet and approve a small budget — once.</p>
+        <p><b id="freehead">The first minute is free.</b> To keep going, connect a Bitcoin Cash wallet and approve a small budget — once.</p>
         <button class="main" id="connect">Connect wallet</button>
         <input id="listener" class="devinput" placeholder="Dev mode: refund address" hidden>
         <p class="fine">Works with Selene, Paytaca and other WizardConnect wallets.</p>
@@ -110,16 +110,16 @@
     <section class="catalog">
       <h2>Catalogue</h2>
       <ul id="tracks"></ul>
-      <p class="fine">Demo catalogue: CC0 tracks by HoliznaCC0 and Komiku. In this demo the artist share goes to the CashCast team; in production artists register their own Bitcoin Cash address.</p>
+      <p class="fine">This demo plays CC0 music by HoliznaCC0 and Komiku. Video, podcasts and courses work the same way: any content cut into encrypted segments. In this demo the creator share goes to the CashCast team; in production creators register their own Bitcoin Cash address.</p>
     </section>
 
     <section class="how">
       <h2>How it works</h2>
       <ol>
-        <li><b>Encrypted audio, public.</b> Every 4-second piece of a track is locked with its own key. Anyone can download the locked audio; CashCast sells only the keys.</li>
+        <li><b>Encrypted content, public.</b> Every 4-second piece of a song, video or podcast is locked with its own key. Anyone can download the locked files; CashCast sells only the keys.</li>
         <li><b>One approval.</b> Your wallet funds a tiny Bitcoin Cash contract with your budget. That is the only thing you sign.</li>
         <li><b>Pay as you listen.</b> Your browser signs a running total with a throwaway key — no transaction per second, no fees per second.</li>
-        <li><b>Settle once.</b> When you stop, CashCast takes the signed total (90% to the artist, 10% to CashCast). The contract forces the rest back to your wallet.</li>
+        <li><b>Settle once.</b> When you stop, CashCast takes the signed total (90% to the creator, 10% to CashCast). The contract forces the rest back to your wallet.</li>
         <li><b>No trust needed.</b> If CashCast vanished, anyone could send your whole budget back to you after about a day — the contract allows nothing else.</li>
       </ol>
       <p class="fine">Contract: <a href="https://github.com/samizdatproject/cashcast/blob/main/contracts/CashCastChannel.cash" target="_blank" rel="noopener">CashCastChannel.cash</a> (CashScript, ~240 bytes) · <a href="https://github.com/samizdatproject/cashcast/blob/main/SECURITY.md" target="_blank" rel="noopener">security notes</a></p>

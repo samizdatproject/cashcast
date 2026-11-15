@@ -35,7 +35,7 @@ All of this is enforced by the contract, not by the CashCast server:
 
 ## Known limitations
 
-- The free-minute keys are free by design; anyone can decrypt the first minute of every track.
+- The free-preview keys are free by design; anyone can decrypt the free preview of every track (one minute by default, 4 seconds on the live demo).
 - A listener who stops paying keeps the keys already bought (up to about 20 seconds ahead).
 - Prices use a public BCH/USD feed (Kraken, CoinGecko). If both fail, prices fall back to sats.
 

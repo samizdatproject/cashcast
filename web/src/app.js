@@ -8,7 +8,7 @@ const walletLib = () => import('./wallet.js');
 const verifyLib = () => import('./verify.js');
 
 const $ = (sel) => document.querySelector(sel);
-const AHEAD = 5;                  // keys paid for ahead of the playing segment (≈20 s)
+const AHEAD = 2;                  // spare paid keys beyond what the player has buffered (buffer + spare ≈ 16–20 s)
 const STORE = 'cashcast-session';
 const CLOSE_FEE_SATS = 700;       // when stopping before any paid key: covers the settlement fee so the rest returns now
 const EXPLORER = 'https://blockchair.com/bitcoin-cash/transaction/';
@@ -103,7 +103,7 @@ async function ensureCredits() {
   if (s.priceSatsPerSegment && s.priceSatsPerSegment > T.price) throw new Error('The server asked for a higher price than you approved; payments stopped.');
   const price = T.price;
   const t = state.track;
-  // Nothing is paid while the free minute still has more than ~28 s to go.
+  // Nothing is paid while the free preview still has more than ~28 s to go.
   if (Math.floor(($('#audio').currentTime || 0) / 4) < state.config.freeSegments - AHEAD - 2) return;
   const boughtHere = [...state.bought].filter((k) => k.startsWith(`${t.trackId}/`)).length;
   const leftInTrack = Math.max(0, t.keyHashes.length - state.config.freeSegments - boughtHere);
@@ -278,7 +278,7 @@ function play(track, autoplay = true) {
   state.track = track;
   state.hls?.destroy();
   const hls = new Hls({
-    maxBufferLength: 12, maxMaxBufferLength: 16,          // don't fetch keys far ahead of what is paid
+    maxBufferLength: 8, maxMaxBufferLength: 10,           // don't fetch keys far ahead of what is heard
     keyLoadPolicy: { default: { maxTimeToFirstByteMs: 8000, maxLoadTimeMs: 20000,
       timeoutRetry: { maxNumRetry: 2, retryDelayMs: 0, maxRetryDelayMs: 0 },
       errorRetry: { maxNumRetry: 8, retryDelayMs: 1500, maxRetryDelayMs: 4000 } } },
@@ -304,7 +304,7 @@ function play(track, autoplay = true) {
     // The player buffers ahead, so this happens before the free minute is over: keep playing
     // what is buffered; playback simply waits at the first unpaid segment.
     if (state.session?.status === 'funded') ensureCredits().then(() => state.hls?.startLoad()).catch(showError);
-    else if (state.step === 'free') $('.panel').classList.add('nudge');
+    else if (!$('[data-step=free]').hidden) $('.panel').classList.add('nudge');
   });
   state.hls = hls;
   $('#title').textContent = track.title;
@@ -379,7 +379,7 @@ function renderMeter() {
   const a = $('#audio'), inFree = a.currentTime < state.config.freeSegments * 4;
   const ticking = !a.paused && !inFree;
   $('#livedot').classList.toggle('on', ticking);
-  $('#livestate').textContent = a.paused ? 'Paused' : inFree ? 'Free minute · nothing used' : `Playing · ${Math.round(perSecond)} sats / second`;
+  $('#livestate').textContent = a.paused ? 'Paused' : inFree ? 'Free preview · nothing used' : `Playing · ${Math.round(perSecond)} sats / second`;
   $('#approved').textContent = money(T.budget);
   $('#used').textContent = used.toLocaleString();
   $('#usedc').textContent = cents(used);
@@ -551,7 +551,10 @@ async function init() {
   const c = state.config;
   // The rate shown is computed from the price actually charged per 4-second segment.
   const perMinute = c.priceSatsPerSegment * 15;
-  $('#rate').textContent = `${c.usdPerBch ? money(perMinute) : `${perMinute.toLocaleString()} sats`} / minute · first minute free`;
+  const freeSec = c.freeSegments * 4;
+  const free = freeSec % 60 === 0 ? `first ${freeSec === 60 ? 'minute' : `${freeSec / 60} minutes`}` : `first ${freeSec} seconds`;
+  $('#rate').textContent = `${c.usdPerBch ? money(perMinute) : `${perMinute.toLocaleString()} sats`} / minute · ${free} free`;
+  $('#freehead').textContent = `The ${free} ${freeSec === 60 ? 'is' : 'are'} free.`;
   $('#listener').hidden = !c.dev;
   $('#autosettle').textContent = c.autoSettle ? 'settles on its own after 10 idle minutes' : 'press Stop & settle when you are done';
   if (state.catalog[0]) play(state.catalog[0], false);
@@ -564,7 +567,13 @@ async function init() {
   // While the free minute plays, quietly load the wallet code so "Connect wallet" is instant.
   a.addEventListener('playing', () => setTimeout(() => { walletLib(); verifyLib(); lib(); }, 3000), { once: true });
   a.addEventListener('pause', () => { $('#playbtn').classList.remove('on'); $('#playbtn').ariaLabel = 'Play'; lastPos = null; renderMeter(); });
-  a.addEventListener('timeupdate', () => { countHeard(); if (state.session?.status === 'funded') renderMeter(); else renderProgress(); });
+  a.addEventListener('timeupdate', () => {
+    // The free preview is over and nothing is funded yet: point at the wallet step.
+    if (!$('[data-step=free]').hidden && a.currentTime >= state.config.freeSegments * 4 - 0.5) {
+      $('.panel').classList.add('nudge');
+      $('#freehead').textContent = 'The free preview is over.';
+    }
+    countHeard(); if (state.session?.status === 'funded') renderMeter(); else renderProgress(); });
   a.addEventListener('seeking', () => { lastPos = null; });
   a.addEventListener('ended', () => {
     const i = state.catalog.indexOf(state.track);

@@ -301,10 +301,10 @@ function play(track, autoplay = true) {
   });
   hls.on(Hls.Events.ERROR, (_, data) => {
     if (data.details !== Hls.ErrorDetails.KEY_LOAD_ERROR) return;
-    // The player buffers ahead, so this happens before the free minute is over: keep playing
-    // what is buffered; playback simply waits at the first unpaid segment.
+    // The player buffers ahead, so this happens before the free preview is over: keep playing
+    // what is buffered; playback simply waits at the first unpaid segment. (The wallet nudge is
+    // shown by the timeupdate handler when the preview actually ends, not here.)
     if (state.session?.status === 'funded') ensureCredits().then(() => state.hls?.startLoad()).catch(showError);
-    else if (!$('[data-step=free]').hidden) $('.panel').classList.add('nudge');
   });
   state.hls = hls;
   $('#title').textContent = track.title;

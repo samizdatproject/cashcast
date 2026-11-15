@@ -6,12 +6,13 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { join } from 'node:path';
 import fastifyStatic from '@fastify/static';
-import { ElectrumNetworkProvider, MockNetworkProvider, randomUtxo } from 'cashscript';
+import { MockNetworkProvider, randomUtxo } from 'cashscript';
 import { generatePrivateKey, hexToBin, binToHex, hash160, secp256k1 } from '@bitauth/libauth';
 import { openDb } from './db.js';
 import { buildServer } from './server.js';
 import { p2pkhAddress } from './channel.js';
 import { livePrice } from './price.js';
+import { FailoverProvider } from './chain.js';
 
 const root = new URL('..', import.meta.url).pathname;
 const network = process.env.CASHCAST_NETWORK || 'mock';
@@ -30,7 +31,7 @@ if (!/^[0-9a-f]{64}$/i.test(masterHex)) throw new Error('master secret must be 6
 const masterSecret = Buffer.from(masterHex, 'hex');
 const providerKey = hexToBin(secret(`provider-${network}.key`, () => binToHex(generatePrivateKey())));
 
-const provider = network === 'mainnet' ? new ElectrumNetworkProvider('mainnet') : new MockNetworkProvider();
+const provider = network === 'mainnet' ? new FailoverProvider('mainnet', undefined, { log: (m) => console.log(m) }) : new MockNetworkProvider();
 if (network === 'mock') provider.setBlockHeight(950_000);
 
 const payouts = [

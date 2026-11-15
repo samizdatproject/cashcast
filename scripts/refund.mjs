@@ -4,7 +4,8 @@
 //   node scripts/refund.mjs <sessionId>          check only (prints what it would do)
 //   node scripts/refund.mjs <sessionId> --send   build and broadcast the refund
 import { join } from 'node:path';
-import { ElectrumNetworkProvider, TransactionBuilder } from 'cashscript';
+import { TransactionBuilder } from 'cashscript';
+import { FailoverProvider } from '../src/chain.js';
 import { hexToBin, flattenBinArray } from '@bitauth/libauth';
 import { openDb } from '../src/db.js';
 import { channelContract } from '../src/channel.js';
@@ -16,7 +17,7 @@ const db = openDb(join(root, 'cashcast-mainnet.db'));
 const s = db.prepare('SELECT * FROM sessions WHERE id = ?').get(id);
 if (!s) throw new Error(`no session ${id}`);
 
-const provider = new ElectrumNetworkProvider('mainnet');
+const provider = new FailoverProvider('mainnet');
 const providerPk = (await import('@bitauth/libauth')).secp256k1.derivePublicKeyCompressed(
   hexToBin((await import('node:fs')).readFileSync(join(root, 'secrets', 'provider-mainnet.key'), 'utf8').trim()));
 const contract = channelContract({ userPkh: s.user_pkh, sessionPk: s.session_pk, providerPk: Buffer.from(providerPk).toString('hex'),

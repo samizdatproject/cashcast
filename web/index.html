@@ -53,9 +53,13 @@
       </div>
 
       <div class="step" data-step="pair" hidden>
-        <p><b>Scan with your wallet</b></p>
+        <p><b id="pairhead">Scan with your wallet</b></p>
+        <p class="fine phoneonly">Tap the button to open your wallet app (Selene, Paytaca) and approve the connection, then come back to this tab.</p>
         <div class="qrwrap"><div id="qr"></div></div>
         <a class="main ghost" id="walletlink">Open wallet on this device</a>
+        <button class="main ghost" id="copylink" type="button">Copy connection link</button>
+        <button class="linkish phoneonly" id="showqr" type="button">Show QR code (to scan from another device)</button>
+        <p class="fine" id="pairhelp" hidden>Nothing happened? Open your wallet, go to WizardConnect or Scan, and paste the copied link there. Or open <b>cashcast.cls9.com</b> on a computer and scan the code with your phone.</p>
         <p class="fine"><span id="relaystatus">connecting…</span> · <a href="#" id="cancelpair">cancel</a></p>
       </div>
 

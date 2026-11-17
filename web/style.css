@@ -50,6 +50,14 @@ h2 { font: 600 22px/1.2 var(--display); margin: 0 0 12px; }
 .main:disabled { opacity: .6; cursor: progress; }
 .main.ghost { background: transparent; color: var(--green); border: 1px solid var(--line); margin-top: 8px; }
 .qrwrap { display: grid; place-items: center; margin: 4px 0 8px; }
+.phoneonly { display: none; }
+.linkish { background: none; border: 0; padding: 10px 0 0; color: var(--mut); font: inherit; font-size: 13px; text-decoration: underline; cursor: pointer; }
+/* On a phone the wallet is usually on the same device: lead with the app link, keep the QR one tap away. */
+.phone .phoneonly { display: block; }
+.phone .qrwrap { display: none; }
+.phone.showqr .qrwrap { display: grid; }
+.phone.showqr #showqr { display: none; }
+.phone #walletlink { background: var(--green); color: var(--green-ink); border: 0; }
 #qr { width: 220px; background: #fff; border-radius: 12px; padding: 6px; }
 #qr svg { display: block; width: 100%; height: auto; }
 .chips { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-bottom: 12px; }

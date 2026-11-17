@@ -418,6 +418,39 @@ function renderChips() {
 }
 
 // ---------- wallet flow ----------
+// Phones: the wallet app is usually on the same device, so the QR code is useless there. Lead with the app link,
+// offer the link to copy (for wallets that paste a WizardConnect link), and explain the computer-and-scan fallback
+// when the user comes back from the wallet and nothing has connected.
+const isPhone = () => /iPhone|iPad|iPod|Android/i.test(navigator.userAgent) || matchMedia('(pointer: coarse) and (max-width: 820px)').matches;
+let pairHelpTimer = null;
+function setupPairing() {
+  const box = $('[data-step=pair]');
+  const phone = isPhone();
+  box.classList.toggle('phone', phone);
+  box.classList.remove('showqr');
+  $('#pairhead').textContent = phone ? 'Connect your wallet app' : 'Scan with your wallet';
+  $('#walletlink').textContent = phone ? 'Open my wallet app' : 'Open wallet on this device';
+  $('#copylink').textContent = 'Copy connection link';
+  $('#pairhelp').hidden = true;
+  clearTimeout(pairHelpTimer);
+  pairHelpTimer = setTimeout(() => { if (!box.hidden) $('#pairhelp').hidden = false; }, phone ? 15_000 : 45_000);
+}
+function initPairingHelp() {
+  $('#showqr').onclick = () => $('[data-step=pair]').classList.add('showqr');
+  $('#copylink').onclick = async () => {
+    const link = $('#walletlink').href;
+    if (!link) return;
+    try { await navigator.clipboard.writeText(link); $('#copylink').textContent = 'Copied. Paste it in your wallet'; }
+    catch { window.prompt('Copy this link and paste it in your wallet:', link); }
+    $('#pairhelp').hidden = false;
+  };
+  // Back from the wallet app and still not connected: show the other ways after a short grace period.
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState !== 'visible' || $('[data-step=pair]').hidden) return;
+    clearTimeout(pairHelpTimer);
+    pairHelpTimer = setTimeout(() => { if (!$('[data-step=pair]').hidden) $('#pairhelp').hidden = false; }, 8_000);
+  });
+}
 async function connectWallet() {
   if (state.connecting) return;
   state.connecting = true;
@@ -431,6 +464,7 @@ async function connectWallet() {
         state.wallet = w.reconnect((st) => { $('#relaystatus').textContent = st || ''; });
       } else {
         step('pair');
+        setupPairing();
         $('#relaystatus').textContent = 'connecting…';
         state.wallet = await w.connect($('#qr'), $('#walletlink'),
           (st) => { $('#relaystatus').textContent = st === 'connected' ? 'waiting for your wallet…' : (st || ''); });
@@ -615,6 +649,7 @@ async function init() {
       state.session = null; save();
     } catch (e) { showError(e); }
   };
+  initPairingHelp();
   $('#cancelpair').onclick = async (e) => { e.preventDefault(); (await walletLib()).cancelPairing(); step('free'); };
   $('#cancelsign').onclick = (e) => { e.preventDefault(); state.signAbort?.abort(); state.cancelWait = true; };
   $('#switchwallet').onclick = async (e) => { e.preventDefault(); await (await walletLib()).forgetWallet(); state.wallet = null; step('free'); connectWallet(); };

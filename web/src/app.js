@@ -284,6 +284,14 @@ function showWaiting(s) {
 }
 
 // ---------- player ----------
+// After the payment the player restarts loading where it stopped (while the listener was in the wallet it may have
+// given up on the unpaid key). Phones refuse to start audio that no tap started, so if play() is refused the
+// listener gets one big button instead of silence.
+function continuePlayback() {
+  const a = $('#audio');
+  state.hls?.startLoad(a.currentTime);
+  a.play().then(() => { $('#continue').hidden = true; }).catch(() => { $('#continue').hidden = false; });
+}
 function play(track, autoplay = true) {
   state.track = track;
   state.hls?.destroy();
@@ -310,6 +318,12 @@ function play(track, autoplay = true) {
     ensureCredits().catch(showError);
   });
   hls.on(Hls.Events.ERROR, (_, data) => {
+    // A fatal network error (e.g. key retries used up while the listener was approving) stops loading for good;
+    // once the channel is funded, start again from where playback is.
+    if (data.fatal && data.type === Hls.ErrorTypes.NETWORK_ERROR && state.session?.status === 'funded') {
+      ensureCredits().then(() => state.hls?.startLoad($('#audio').currentTime)).catch(showError);
+      return;
+    }
     if (data.details !== Hls.ErrorDetails.KEY_LOAD_ERROR) return;
     // The player buffers ahead, so this happens before the free preview is over: keep playing
     // what is buffered; playback simply waits at the first unpaid segment. (The wallet nudge is
@@ -528,7 +542,9 @@ async function approve() {
     state.trust.address = state.session.address; // the wallet pays exactly this checked address
     save();
     $('#signamount').textContent = `${money(satoshis)} (${satoshis.toLocaleString()} sats)`;
-    $('#fundstep').textContent = 'Check your wallet';
+    const phone = isPhone();
+    $('#fundstep').textContent = phone ? 'Sending the request to your wallet… stay on this page' : 'Check your wallet';
+    $('#signhint').hidden = true;
     step('signing');
     if ((await refreshSession()).status !== 'funded') {
       if (state.config.dev) {
@@ -540,7 +556,11 @@ async function approve() {
           // Coins looked up in the background are used if they are recent; otherwise they are fetched now.
           const coins = state.coins && Date.now() - state.coins.at < 120_000 ? state.coins.list : undefined;
           state.coins = null;
-          const signed = await (await walletLib()).fund({ contractAddress: state.trust.address, satoshis, api, signal: state.signAbort.signal, coins });
+          const onSent = () => {
+            $('#fundstep').textContent = phone ? 'Now open your wallet app to approve' : 'Check your wallet';
+            if (phone) $('#signhint').hidden = false;
+          };
+          const signed = await (await walletLib()).fund({ contractAddress: state.trust.address, satoshis, api, signal: state.signAbort.signal, coins, onSent });
           state.session.signedHex = signed.hex; save();
         }
         $('#fundstep').textContent = 'Sending…';
@@ -563,8 +583,7 @@ async function approve() {
     $('.panel').classList.remove('nudge');
     await ensureCredits();
     renderMeter();
-    $('#audio').play().catch(() => {});
-    state.hls?.startLoad();
+    continuePlayback();
   } catch (e) { showError(e.name === 'AbortError' ? 'Cancelled.' : e); step('approve'); }
   finally { state.approving = false; state.signAbort = null; btn.disabled = false; btn.textContent = 'Approve'; }
 }
@@ -607,6 +626,8 @@ async function init() {
 
   const a = $('#audio');
   $('#playbtn').onclick = () => (a.paused ? a.play() : a.pause());
+  $('#continue').onclick = () => { a.play().catch(showError); };
+  a.addEventListener('playing', () => { $('#continue').hidden = true; });
   a.addEventListener('play', () => { $('#playbtn').classList.add('on'); $('#playbtn').ariaLabel = 'Pause'; });
   // While the free minute plays, quietly load the wallet code so "Connect wallet" is instant.
   a.addEventListener('playing', () => setTimeout(() => { walletLib(); verifyLib(); lib(); }, 3000), { once: true });

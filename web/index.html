@@ -72,10 +72,12 @@
 
       <div class="step" data-step="signing" hidden>
         <p><b id="fundstep">Check your wallet</b></p>
+        <p class="fine" id="signhint" hidden>Wallets don't show a notification for this: switch to your wallet app yourself. If the request isn't there, close the wallet app and open it again; the request waits for you.</p>
         <p class="fine">It asks you to send <b id="signamount"></b> to a CashCast channel contract. Only you can get unspent money back from it — automatically. · <a href="#" id="cancelsign">cancel</a></p>
       </div>
 
       <div class="step" data-step="funded" hidden>
+        <button class="main" id="continue" type="button" hidden>▶ Continue listening</button>
         <div class="live"><span class="dot" id="livedot"></span><span id="livestate">Paused</span><span class="of">of <b id="approved"></b> approved</span></div>
         <div class="meter">
           <div><span class="k">Used <span class="up">↑</span></span><b id="used"></b><small id="usedc"></small></div>

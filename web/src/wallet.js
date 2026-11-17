@@ -145,7 +145,7 @@ export async function loadCoins(api) {
     .sort((a, b) => b.satoshis - a.satoshis);
 }
 
-export async function fund({ contractAddress, satoshis, api, signal, coins }) {
+export async function fund({ contractAddress, satoshis, api, signal, coins, onSent }) {
   const byAddress = ownAddresses();
   coins = (coins || await loadCoins(api)).filter((c) => byAddress.has(c.address));
 
@@ -177,6 +177,10 @@ export async function fund({ contractAddress, satoshis, api, signal, coins }) {
   });
 
   const unsignedHex = transactionToHex(inputs, outputs);
+  // Tell the page once the request has reached the relay: on a phone, leaving the browser before that
+  // pauses the page and the wallet has nothing to show yet.
+  const sent = (msg) => { if (msg?.transaction?.transaction === unsignedHex) { manager?.off('messagesent', sent); onSent?.(); } };
+  manager.on('messagesent', sent);
   const res = await manager.signTransaction({
     transaction: {
       transaction: unsignedHex,
@@ -185,7 +189,7 @@ export async function fund({ contractAddress, satoshis, api, signal, coins }) {
       userPrompt: `CashCast listening budget: ${satoshis.toLocaleString()} sats. Unspent money returns to you automatically.`,
     },
     inputPaths,
-  }, { signal });
+  }, { signal }).finally(() => manager?.off('messagesent', sent));
   if (res.error || !res.signedTransaction) throw new Error(res.error || 'The wallet did not sign');
   const signed = res.signedTransaction;
   // Check the wallet signed exactly what we asked: with the signatures blanked out, the signed

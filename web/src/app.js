@@ -143,11 +143,37 @@ async function refreshSession() {
   return state.session;
 }
 
-async function waitForFunding() {
+const SIGN_WINDOW_MS = 15 * 60_000; // how long a phone wallet may still broadcast a request it was sent
+async function waitForWalletPayment() {
+  $('#signamount').textContent = `${money(state.trust.budget)} (${state.trust.budget.toLocaleString()} sats)`;
+  $('#fundstep').textContent = 'Approve the payment in your wallet app; this page will notice it';
+  $('#signhint').hidden = false;
+  step('signing');
+  try {
+    // Wait as long as the wallet may still send it (the same window resume() honours).
+    await waitForFunding(Math.max(state.trust.signRequestedAt + SIGN_WINDOW_MS, Date.now() + 120_000));
+  } catch (e) {
+    delete state.trust.signRequestedAt; save();
+    showError(e.name === 'AbortError' ? 'Cancelled. If your wallet already sent the payment, reload in a minute.' : e);
+    step(state.wallet ? 'approve' : 'free');
+    return;
+  }
+  delete state.trust.signRequestedAt; save();
+  step('funded');
+  $('.panel').classList.remove('nudge');
+  renderMeter();
+  continuePlayback();
+  ensureCredits().then(renderMeter).catch(showError);
+}
+
+// Polls until the channel is funded or `until` (ms) passes. A failed poll is retried; only a session the server
+// no longer knows (401/404) ends it early.
+async function waitForFunding(until = Date.now() + 300_000) {
   state.cancelWait = false;
-  for (let i = 0; i < 150; i++) {
+  while (Date.now() < until) {
     if (state.cancelWait) throw Object.assign(new Error('Cancelled.'), { name: 'AbortError' });
-    if ((await refreshSession()).status === 'funded') return;
+    try { if ((await refreshSession()).status === 'funded') return; }
+    catch (e) { if (e.status === 401 || e.status === 404) throw e; }
     await new Promise((r) => setTimeout(r, 2000));
   }
   throw new Error('No payment seen yet. If your wallet sent it, reload in a minute.');
@@ -534,6 +560,14 @@ async function approve() {
     await state.prepared?.catch(() => {}); // a background preparation still running: let it finish
     const ownPkh = await ownRefundPkh();
     await ensureSession(ownPkh);
+    // A phone wallet still holding an earlier request for this session may pay it: wait for that payment (with its
+    // own budget) instead of asking a second time. The marker is only ever set on phones.
+    if (state.session.status === 'open' && state.trust?.signRequestedAt && Date.now() - state.trust.signRequestedAt < SIGN_WINDOW_MS) {
+      $('.panel').classList.remove('nudge');
+      state.approving = false;
+      await waitForWalletPayment();
+      return;
+    }
     // A funding already signed for this session keeps its amount, whatever chip is selected now.
     const satoshis = state.session.signedHex ? state.trust.budget : (state.trust.budget = state.budget);
     const { secp256k1 } = await lib();
@@ -546,6 +580,7 @@ async function approve() {
     $('#fundstep').textContent = phone ? 'Sending the request to your wallet… stay on this page' : 'Check your wallet';
     $('#signhint').hidden = true;
     step('signing');
+    let unconfirmedSpent = false; // phone: the node says the inputs are spent, which may be the wallet's own broadcast
     if ((await refreshSession()).status !== 'funded') {
       if (state.config.dev) {
         await api('/api/dev/fund', { method: 'POST', body: { address: state.trust.address, satoshis } });
@@ -558,10 +593,11 @@ async function approve() {
           state.coins = null;
           const onSent = () => {
             $('#fundstep').textContent = phone ? 'Now open your wallet app to approve' : 'Check your wallet';
-            if (phone) $('#signhint').hidden = false;
+            // Phones: the wallet broadcasts, so a reload while it decides must wait for that payment, not ask twice.
+            if (phone) { $('#signhint').hidden = false; state.trust.signRequestedAt = Date.now(); save(); }
           };
-          const signed = await (await walletLib()).fund({ contractAddress: state.trust.address, satoshis, api, signal: state.signAbort.signal, coins, onSent });
-          state.session.signedHex = signed.hex; save();
+          const signed = await (await walletLib()).fund({ contractAddress: state.trust.address, satoshis, api, signal: state.signAbort.signal, coins, onSent, walletBroadcasts: phone });
+          state.session.signedHex = signed.hex; delete state.trust.signRequestedAt; save();
         }
         $('#fundstep').textContent = 'Sending…';
         try {
@@ -569,7 +605,16 @@ async function approve() {
         } catch (e) {
           // Already known or already mined: fine, keep waiting. Anything that means it can never
           // confirm (coins spent elsewhere, invalid): forget it so the next approval signs afresh.
-          if (/missingorspent|missing inputs|mandatory-script-verify|bad-txns|txn-mempool-conflict|non-mandatory|dust|insufficient/i.test(e.message)) {
+          if (/missingorspent|missing inputs|txn-mempool-conflict/i.test(e.message)) {
+            // Spent inputs can mean the payment is already out: on phones the wallet broadcasts it itself.
+            const status = (await refreshSession().catch(() => ({}))).status;
+            if (status !== 'funded' && !phone) {
+              delete state.session.signedHex; save();
+              throw new Error(`The payment could not be sent (${e.message}). Nothing was spent; please approve again.`);
+            }
+            if (status !== 'funded') unconfirmedSpent = true; // phone: wait below, never claim nothing was spent
+          } else if (/mandatory-script-verify|non-mandatory|bad-txns|dust|insufficient/i.test(e.message)) {
+            // Invalid: it can never confirm, and a wallet's own broadcast of it would have failed the same way.
             delete state.session.signedHex; save();
             throw new Error(`The payment could not be sent (${e.message}). Nothing was spent; please approve again.`);
           }
@@ -577,14 +622,28 @@ async function approve() {
         }
       }
       $('#fundstep').textContent = 'Waiting for the network…';
-      await waitForFunding();
+      try { await waitForFunding(); } catch (err) {
+        if (unconfirmedSpent && err.name !== 'AbortError') {
+          delete state.session.signedHex; save();
+          throw new Error('Could not confirm the payment yet. Check your wallet before approving again.');
+        }
+        throw err;
+      }
     }
     step('funded');
     $('.panel').classList.remove('nudge');
     await ensureCredits();
     renderMeter();
     continuePlayback();
-  } catch (e) { showError(e.name === 'AbortError' ? 'Cancelled.' : e); step('approve'); }
+  } catch (e) {
+    const phone = isPhone(); // the try block's `phone` is not in scope here
+    const walletAnswered = e.name === 'AbortError' || /did not sign|reject|declin|denied|cancel/i.test(e.message || '');
+    // Keep the phone marker unless the wallet answered or the listener cancelled: the wallet may still pay, and
+    // the marker makes a reload (or the next Approve) wait for that payment instead of asking twice.
+    if (state.trust?.signRequestedAt && walletAnswered) { delete state.trust.signRequestedAt; save(); }
+    const mayHavePaid = phone ? ' If your wallet already sent the payment, reload in a minute.' : '';
+    showError(e.name === 'AbortError' ? `Cancelled.${mayHavePaid}` : e); step('approve');
+  }
   finally { state.approving = false; state.signAbort = null; btn.disabled = false; btn.textContent = 'Approve'; }
 }
 
@@ -603,8 +662,17 @@ async function resume() {
   const s = state.session;
   // Keys bought before the reload are remembered, so replaying them is not paid for twice.
   state.bought = new Set(state.trust?.keys || []);
-  if (s.status === 'funded' && state.trust && s.height < s.params.timeout - 12) { step('funded'); renderMeter(); return; }
+  if (s.status === 'funded' && state.trust && s.height < s.params.timeout - 12) {
+    if (state.trust.signRequestedAt) { delete state.trust.signRequestedAt; save(); }
+    step('funded'); renderMeter(); $('#continue').hidden = false; return;
+  }
   if (['funded', 'expired', 'closed', 'settling'].includes(s.status)) { showWaiting(s); return; }
+  if (s.status === 'open' && state.trust?.signRequestedAt && Date.now() - state.trust.signRequestedAt < SIGN_WINDOW_MS) {
+    // The page was reloaded (phones discard background tabs) while the wallet still had the payment request.
+    // Asking again could pay twice, so wait for the wallet's own broadcast instead.
+    waitForWalletPayment();
+    return;
+  }
   if (s.status === 'open') return; // never funded: the next approval reuses it
   state.session = null; save();       // settled or refunded: done
 }

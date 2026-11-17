@@ -145,7 +145,7 @@ export async function loadCoins(api) {
     .sort((a, b) => b.satoshis - a.satoshis);
 }
 
-export async function fund({ contractAddress, satoshis, api, signal, coins, onSent }) {
+export async function fund({ contractAddress, satoshis, api, signal, coins, onSent, walletBroadcasts = false }) {
   const byAddress = ownAddresses();
   coins = (coins || await loadCoins(api)).filter((c) => byAddress.has(c.address));
 
@@ -185,7 +185,9 @@ export async function fund({ contractAddress, satoshis, api, signal, coins, onSe
     transaction: {
       transaction: unsignedHex,
       sourceOutputs: sourceOutputs.map(sourceOutputToRelay),
-      broadcast: false,
+      // On phones the browser tab may be discarded while the listener is in the wallet app, so the wallet
+      // broadcasts the payment itself; the page finds the funded channel on chain when it comes back.
+      broadcast: walletBroadcasts,
       userPrompt: `CashCast listening budget: ${satoshis.toLocaleString()} sats. Unspent money returns to you automatically.`,
     },
     inputPaths,
@@ -197,6 +199,10 @@ export async function fund({ contractAddress, satoshis, api, signal, coins, onSe
   const tx = decodeTransaction(hexToBin(signed));
   if (typeof tx === 'string') throw new Error(`wallet returned an invalid transaction: ${tx}`);
   const blanked = transactionToHex(tx.inputs.map((i) => ({ ...i, unlockingBytecode: new Uint8Array() })), tx.outputs, tx.version, tx.locktime);
-  if (blanked !== unsignedHex) throw new Error('The wallet returned a different transaction; nothing was sent.');
+  if (blanked !== unsignedHex) {
+    throw new Error(walletBroadcasts
+      ? 'The wallet signed a different transaction than CashCast asked for. Check your wallet before trying again.'
+      : 'The wallet returned a different transaction; nothing was sent.');
+  }
   return { hex: signed, txid: hashTransaction(hexToBin(signed)) };
 }

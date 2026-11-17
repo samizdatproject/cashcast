@@ -76,13 +76,28 @@ export async function disconnectWallet() {
   await forgetWallet('user disconnected');
 }
 
+// The relay library closes its link whenever the page is hidden. On a phone the wallet app is in front exactly
+// then, so pairing and signing ping-pong between the apps. Its visibility listener is registered synchronously
+// while the relay is created (initiateDappRelay does not pass the option through), so skip it there: the link then
+// stays open as long as the browser allows, and if the browser drops it the library reconnects and replays.
+function withoutHiddenDisconnect(create) {
+  const add = document.addEventListener;
+  document.addEventListener = function (type, ...rest) { if (type !== 'visibilitychange') return add.call(this, type, ...rest); };
+  try { return create(); } finally { document.addEventListener = add; }
+}
+
+let onGone = null;
+/** Called when the wallet itself ends the connection (e.g. the listener disconnects in the wallet app). */
+export function onWalletGone(cb) { onGone = cb; }
+
 function newManager(onStatus, existing) {
   manager?.removeAllListeners();
   relay?.cleanup();
   manager = new DappConnectionManager('CashCast', `${location.origin}/icon.svg`, { session: { key: SESSION_KEY } });
-  relay = initiateDappRelay(({ client, status }) => { manager.updateConnection(client, status); onStatus?.(status?.status); },
-    existing ? { existingCredentials: existing } : undefined);
+  relay = withoutHiddenDisconnect(() => initiateDappRelay(({ client, status }) => { manager.updateConnection(client, status); onStatus?.(status?.status); },
+    existing ? { existingCredentials: existing } : undefined));
   manager.attachRelay(relay);
+  manager.on('disconnect', () => { if (manager?.isWalletDiscovered()) onGone?.(); });
 }
 
 // Reconnect to the remembered wallet without a QR code. Addresses come from the stored session;

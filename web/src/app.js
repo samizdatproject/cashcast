@@ -4,7 +4,7 @@ import Hls from 'hls.js/dist/hls.light.mjs';
 
 // Crypto and wallet code load only when the listener decides to pay, so the free minute starts fast.
 const lib = () => import('@bitauth/libauth');
-const walletLib = () => import('./wallet.js');
+const walletLib = () => import('./wallet.js').then((w) => { w.onWalletGone(walletGone); return w; });
 const verifyLib = () => import('./verify.js');
 
 const $ = (sel) => document.querySelector(sel);
@@ -160,6 +160,7 @@ async function waitForWalletPayment() {
   }
   delete state.trust.signRequestedAt; save();
   step('funded');
+  $('#channelnote').hidden = true;
   $('.panel').classList.remove('nudge');
   renderMeter();
   continuePlayback();
@@ -458,6 +459,19 @@ function renderChips() {
 }
 
 // ---------- wallet flow ----------
+// The listener ended the connection in the wallet app. The approved budget is in the channel, which this page pays
+// from with its own session key, so it does not close with the wallet: say so, and offer to settle now.
+async function walletGone() {
+  state.wallet = null;
+  (await walletLib()).forgetWallet('wallet disconnected').catch(() => {});
+  if (!$('[data-step=funded]').hidden) {
+    $('#channelnote').textContent = 'Your wallet disconnected. Your approved budget stays in this channel and pays for what you play. Tap Stop & settle to get the rest back now.';
+    $('#channelnote').hidden = false;
+  } else if (!$('[data-step=approve]').hidden || !$('[data-step=pair]').hidden) {
+    step('free');
+  }
+}
+
 // Phones: the wallet app is usually on the same device, so the QR code is useless there. Lead with the app link,
 // offer the link to copy (for wallets that paste a WizardConnect link), and explain the computer-and-scan fallback
 // when the user comes back from the wallet and nothing has connected.
@@ -631,6 +645,7 @@ async function approve() {
       }
     }
     step('funded');
+    $('#channelnote').hidden = true;
     $('.panel').classList.remove('nudge');
     await ensureCredits();
     renderMeter();
@@ -664,6 +679,8 @@ async function resume() {
   state.bought = new Set(state.trust?.keys || []);
   if (s.status === 'funded' && state.trust && s.height < s.params.timeout - 12) {
     if (state.trust.signRequestedAt) { delete state.trust.signRequestedAt; save(); }
+    $('#channelnote').textContent = 'Continuing the channel you approved earlier. Tap Stop & settle when you are done; the rest comes back to your wallet.';
+    $('#channelnote').hidden = false;
     step('funded'); renderMeter(); $('#continue').hidden = false; return;
   }
   if (['funded', 'expired', 'closed', 'settling'].includes(s.status)) { showWaiting(s); return; }

@@ -1,4 +1,4 @@
-// CashCast player. The free first minute plays at once; after that a throwaway session key in
+// CashCast player. The free first seconds play at once; after that a throwaway session key in
 // this browser signs a growing total, and the server sells one segment key per credit.
 import Hls from 'hls.js/dist/hls.light.mjs';
 
